@@ -478,8 +478,17 @@ def note_decision(decision):
     event_log.emit(BASE, 'auto_decision', **{key: value for key, value in decision.items() if key != 'account'})
 
 
+def active_reading(events, key):
+    """The account Code is on, and the engine's `key` entry for it, from this tick's poll event."""
+    poll = next((event for event in events if event.get('event') == 'poll'), {})
+    active = poll.get('active') if isinstance(poll.get('active'), dict) else {}
+    table = poll.get(key) if isinstance(poll.get(key), dict) else {}
+    return active, table.get(str(active.get('number')))
+
+
 def read_burn(now=None):
-    """Recent (time, account number, used %) samples of whichever account Code was on."""
+    """Recent (time, account number, used %, limit) samples of whichever account Code was on.
+    The limit is the one that was fullest; samples saved before it was recorded have none."""
     now = time.time() if now is None else now
     try:
         samples = json.loads((BASE / 'burn.json').read_text())
@@ -488,31 +497,37 @@ def read_burn(now=None):
     if not isinstance(samples, list):
         return []
     return [sample for sample in samples
-            if isinstance(sample, list) and len(sample) == 3
-            and all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in sample)
+            if isinstance(sample, list) and len(sample) in (3, 4)
+            and all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in sample[:3])
+            and (len(sample) == 3 or sample[3] is None or isinstance(sample[3], str))
             and now - BURN_WINDOW <= sample[0] <= now]
 
 
 def note_burn(samples, events, now=None):
     """Add this tick's reading of the active account and keep the last BURN_WINDOW."""
     now = time.time() if now is None else now
-    poll = next((event for event in events if event.get('event') == 'poll'), {})
-    active = poll.get('active') if isinstance(poll.get('active'), dict) else {}
+    active, headroom = active_reading(events, 'headroomPct')
     number = active.get('number')
-    headroom = (poll.get('headroomPct') or {}).get(str(number))
     if type(number) is not int or not isinstance(headroom, (int, float)) or isinstance(headroom, bool):
         return samples
-    samples = [*samples, [now, number, 100.0 - headroom]]
+    samples = [*samples, [now, number, 100.0 - headroom, active_window(events, active.get('email'))]]
     atomic_json(BASE / 'burn.json', samples)
     return samples
 
 
 def burn_rate(samples):
     """Points per second the work is spending. Pace belongs to the work, not the account,
-    so it carries across a switch: only the gap that spans a switch or a reset is skipped."""
+    so it carries across a switch: only the gap that spans a switch or a reset is skipped.
+
+    So is a gap where the fullest limit changed. Percentages of two limits are not one
+    scale: going from "the week, 60%" to "Fable, 84%" is a change of ruler, and read as
+    spend it brought the exit forward by twenty points for a quarter of an hour.
+    """
     spent = span = 0.0
-    for (start, account, used), (end, next_account, next_used) in zip(samples, samples[1:]):
-        if account == next_account and next_used >= used and end > start:
+    for first, second in zip(samples, samples[1:]):
+        (start, account, used), (end, next_account, next_used) = first[:3], second[:3]
+        same_limit = (first[3] if len(first) > 3 else None) == (second[3] if len(second) > 3 else None)
+        if account == next_account and same_limit and next_used >= used and end > start:
             spent += next_used - used
             span += end - start
     return spent / span if span >= BURN_MIN_SPAN else 0.0
@@ -562,20 +577,17 @@ def auto_events(threshold, timeout, hold=False, models=AUTO_MODELS):
 
 def active_used(events, email):
     """The active account's binding usage in whole percent, from the engine's poll event."""
-    poll = next((event for event in events if event.get('event') == 'poll'), {})
-    active = poll.get('active') if isinstance(poll.get('active'), dict) else {}
-    headroom = (poll.get('headroomPct') or {}).get(str(active.get('number')))
-    if not isinstance(headroom, (int, float)) or str(active.get('email', '')).lower() != (email or ''):
+    active, headroom = active_reading(events, 'headroomPct')
+    if (not isinstance(headroom, (int, float)) or isinstance(headroom, bool)
+            or str(active.get('email', '')).lower() != (email or '')):
         return None
     return max(0, min(100, round(100 - headroom)))
 
 
 def active_window(events, email):
     """Which of the active account's limits is fullest: '7d', '5h' or a model such as 'Fable'."""
-    poll = next((event for event in events if event.get('event') == 'poll'), {})
-    active = poll.get('active') if isinstance(poll.get('active'), dict) else {}
-    windows = (poll.get('windowsPct') or {}).get(str(active.get('number')))
-    if not isinstance(windows, dict) or str(active.get('email', '')).lower() != (email or ''):
+    active, windows = active_reading(events, 'windowsPct')
+    if not isinstance(windows, dict) or str(active.get('email', '')).lower() != str(email or '').lower():
         return None
     used = {name: value for name, value in windows.items()
             if isinstance(name, str) and isinstance(value, (int, float)) and not isinstance(value, bool)}
@@ -591,9 +603,7 @@ def spent_model_limit(events):
     """
     if any(event.get('event') == 'switch' for event in events):
         return None
-    poll = next((event for event in events if event.get('event') == 'poll'), {})
-    active = poll.get('active') if isinstance(poll.get('active'), dict) else {}
-    windows = (poll.get('windowsPct') or {}).get(str(active.get('number')))
+    _, windows = active_reading(events, 'windowsPct')
     if not isinstance(windows, dict):
         return None
     spent = sorted(name for name, value in windows.items()
@@ -605,9 +615,7 @@ def spent_model_limit(events):
 def unread_cause(events):
     """Why the active account's usage could not be read, as the engine names it: 'http-429',
     'timeout', 'foreign credential'... None when it was read or the engine gave no cause."""
-    poll = next((event for event in events if event.get('event') == 'poll'), {})
-    active = poll.get('active') if isinstance(poll.get('active'), dict) else {}
-    cause = (poll.get('fetchErrors') or {}).get(str(active.get('number')))
+    _, cause = active_reading(events, 'fetchErrors')
     return cause if isinstance(cause, str) else None
 
 

@@ -1594,7 +1594,7 @@ class AutoTickTests(unittest.TestCase):
         self.assertEqual(decisions, [{"reason": "cooldown", "hold": "manual", "used": 99, "window": "7d",
                                       "model": "Fable"}])
         stored = json.loads((self.base / "burn.json").read_text())
-        self.assertEqual([sample[1:] for sample in stored], [[2, 99.0]])
+        self.assertEqual([sample[1:] for sample in stored], [[2, 99.0, "7d"]])
 
     def test_the_week_only_decides_when_a_model_limit_is_all_that_is_spent(self):
         def poll(windows):
@@ -1637,6 +1637,40 @@ class AutoTickTests(unittest.TestCase):
         self.assertEqual(companion.leave_at(99, [[0, 3, 10.0], [180, 3, 60.0]]), 80.0)
         self.assertEqual(companion.leave_at(60, [[0, 3, 10.0], [180, 3, 60.0]]), 60)
 
+    def test_a_change_of_fullest_limit_is_not_read_as_spend(self):
+        # Ten flat minutes saved before model limits were counted, then the first reading
+        # that counts them: the week is still 60%, and Fable, now the fullest, is at 84%.
+        flat = [[minute * 60, 2, 60.0] for minute in range(11)]
+        stepped = flat + [[660, 2, 84.0, "Fable"], [720, 2, 84.0, "Fable"]]
+        self.assertEqual(companion.burn_rate(stepped), 0.0)
+        self.assertEqual(companion.leave_at(95, stepped), 95)
+        # Spend on the limit that is now fullest still counts: 2 points over the 840 s
+        # either side of the skipped minute.
+        climbing = stepped + [[900, 2, 86.0, "Fable"]]
+        self.assertAlmostEqual(companion.burn_rate(climbing), 2 / 840)
+        # The week overtaking a model, or the reverse, skips that one gap only.
+        crossing = [[0, 2, 70.0, "7d"], [180, 2, 72.0, "7d"], [240, 2, 73.0, "Fable"], [420, 2, 76.0, "Fable"]]
+        self.assertAlmostEqual(companion.burn_rate(crossing), 5 / 360)
+
+    def test_saved_samples_with_and_without_a_limit_are_read(self):
+        now = time.time()
+        self.base.mkdir(parents=True)
+        (self.base / "burn.json").write_text(json.dumps(
+            [[now - 120, 2, 60.0], [now - 60, 2, 61.0, "Fable"], [now - 30, 2, 61.0, None],
+             [now - 20, 2, 61.0, 7], [now - 10, 2, True, "Fable"], [now - 5, 2], "noise"]))
+        self.assertEqual([sample[3:] for sample in companion.read_burn(now)], [[], ["Fable"], [None]])
+
+    def test_a_poll_event_of_the_wrong_shape_reads_as_unknown(self):
+        for odd in ([1, 2], "text", 7, None):
+            events = [{"event": "poll", "active": {"number": 2, "email": OLD_EMAIL},
+                       "headroomPct": odd, "windowsPct": odd, "fetchErrors": odd}]
+            self.assertIsNone(companion.active_used(events, OLD_EMAIL))
+            self.assertIsNone(companion.active_window(events, OLD_EMAIL))
+            self.assertIsNone(companion.spent_model_limit(events))
+            self.assertIsNone(companion.unread_cause(events))
+            self.assertEqual(companion.note_burn([], events), [])
+        self.assertIsNone(companion.active_used([{"event": "poll", "active": "x", "headroomPct": {"2": 5}}], OLD_EMAIL))
+
     def test_the_pace_carries_across_a_switch_but_not_the_jump_itself(self):
         samples = [[0, 3, 90.0], [240, 3, 94.0], [300, 1, 16.0], [480, 1, 19.0]]
         # 4 points in 240 s plus 3 in 180 s; the 94 -> 16 step between accounts is skipped.
@@ -1663,7 +1697,7 @@ class AutoTickTests(unittest.TestCase):
         self.assertEqual(decision.kwargs["leaveAt"], 92)
         stored = json.loads((self.base / "burn.json").read_text())
         self.assertEqual(len(stored), 3)  # the sample older than the window is dropped
-        self.assertEqual(stored[-1][1:], [2, 98.0])
+        self.assertEqual(stored[-1][1:], [2, 98.0, None])
 
     def test_recent_browser_or_computer_use_by_any_session_is_seen(self):
         home = Path(self.temporary.name) / "home"
