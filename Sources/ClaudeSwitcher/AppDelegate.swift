@@ -1635,7 +1635,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func autoSwitchTick() {
         // A manual pick is held by the companion: only running low moves it, never an early move.
-        guard config.autoSwitch, !isAutoSwitching, !isSwitchingAccount, !codexBusy, !isSleeping,
+        // A Codex switch waits its turn; a Codex sign-in left open in the browser can last ten
+        // minutes and must not stop Claude from leaving an account in time.
+        guard config.autoSwitch, !isAutoSwitching, !isSwitchingAccount, !codexBusy || codexConnecting, !isSleeping,
               let setup = CoordinatedSetup.load(), setup.enabled else { return }
         isAutoSwitching = true
         let threshold = config.autoSwitchThreshold
