@@ -318,8 +318,10 @@ class PollEvent(AutoSwitchEvent):
     active: dict | None  # account_ref shape, or None
     headroom: dict[str, float | None]  # account number → headroom pct (None=unknown)
     threshold: float
-    # account number → last fetch-error cause ("http-429", "timeout", ...) for
-    # accounts whose usage is unknown this tick. Additive field.
+    # account number → why its usage is unknown this tick: the last
+    # fetch-error cause ("http-429", "timeout", ...) or the sentinel that
+    # stands in for the reading ("token expired", "foreign credential", ...).
+    # Additive field.
     fetch_errors: dict[str, str] = field(default_factory=dict)
     # account number → ordered window label → utilization pct ("5h", "7d",
     # then scoped model display names). Additive field: the binding pct alone
@@ -984,9 +986,14 @@ class AutoSwitchEngine:
                 headroom=headroom,
                 threshold=settings.threshold,
                 fetch_errors={
-                    num: entry.last_error
+                    # A sentinel ("token expired", "foreign credential", ...)
+                    # names its own cause; a failed fetch left it on the row.
+                    num: cause
                     for num, entry in entries.items()
-                    if usage.get(num) is None and entry.last_error
+                    if (cause := (
+                        usage.get(num) if isinstance(usage.get(num), str)
+                        else entry.last_error if usage.get(num) is None else None
+                    ))
                 },
                 windows={
                     num: pcts

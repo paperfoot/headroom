@@ -1598,6 +1598,17 @@ class TestAdaptiveScheduler:
         assert "http-429" in poll.human()
         assert poll.to_json()["fetchErrors"] == {"1": "http-429"}
 
+    def test_poll_event_names_the_sentinel_that_hides_a_reading(self, harness):
+        """A reading replaced by a sentinel has no failed fetch to report, and
+        the log could not say why the active account was unreadable."""
+        harness.tick_with_usage({
+            "1": USAGE_FOREIGN_CREDENTIAL, "2": _usage(10), "3": USAGE_TOKEN_EXPIRED,
+        })
+        poll = next(e for e in harness.events if e.kind == "poll")
+        assert poll.to_json()["fetchErrors"] == {
+            "1": USAGE_FOREIGN_CREDENTIAL, "3": USAGE_TOKEN_EXPIRED,
+        }
+
     def test_quarantined_candidate_never_consumes_the_poll_slot(
         self, temp_home, monkeypatch
     ):
