@@ -7034,3 +7034,130 @@ class TestHoldAndUrgentOnly:
         })
         assert outcome is TickOutcome.SWITCHED
         assert h.active_number() == 2
+
+
+def _week_and_model(week: float, model: float, reset: str) -> dict:
+    """An account with no five-hour window: the week for all models and one
+    model's own week, as plans report them since November 2026."""
+    return {
+        "seven_day": {"pct": week, "resets_at": reset},
+        "scoped": [{"name": "Fable", "pct": model, "resets_at": reset}],
+    }
+
+
+class TestWeekAndModelLimitFleet:
+    """The companion's flags against accounts whose model limit binds first."""
+
+    DAY = 86400.0
+
+    def _harness(self, temp_home: Path, accounts: int = 3, **settings) -> EngineHarness:
+        flags = dict(strategy="consume-first", threshold=99.0, cooldown_seconds=120.0,
+                     urgent_only=True, model="all")
+        h = EngineHarness(temp_home, **{**flags, **settings})
+        for number, email in list(enumerate(
+                ["a@example.com", "b@example.com", "c@example.com"], start=1))[:accounts]:
+            h.seed(number, email)
+        h.make_live("a@example.com", 1)
+        return h
+
+    def _tick(self, h: EngineHarness, at: float, usage: dict) -> TickOutcome:
+        """One `auto --once` run: a new engine process at `at`."""
+        h.clock.now = at
+        h.engine = h._make_engine()
+        return h.tick_with_usage(usage)
+
+    def _last(self, h: EngineHarness, kind: str) -> dict:
+        return next(e.to_json() for e in reversed(h.events) if e.kind == kind)
+
+    def test_an_escape_lands_under_the_line_not_on_the_account_just_drained(self, temp_home):
+        h = self._harness(temp_home)
+        t0 = h.clock.now
+        outcome = h.tick_with_usage({
+            # Active: the model's limit hit 100 between two polls.
+            "1": _week_and_model(82, 100, _iso_at(t0 + 2 * self.DAY)),
+            # Drained to the line earlier; its week resets soonest.
+            "2": _week_and_model(60, 99.4, _iso_at(t0 + 1 * self.DAY)),
+            # Roomy, resets last.
+            "3": _week_and_model(30, 20, _iso_at(t0 + 5 * self.DAY)),
+        })
+        assert outcome is TickOutcome.SWITCHED
+        assert self._last(h, "switch")["trigger"] == "at-limit"
+        assert h.active_number() == 3, "landed on the crumb left on the soonest reset"
+
+    def test_an_escape_still_takes_a_crumb_when_nothing_is_under_the_line(self, temp_home):
+        h = self._harness(temp_home)
+        t0 = h.clock.now
+        outcome = h.tick_with_usage({
+            "1": _week_and_model(82, 100, _iso_at(t0 + 2 * self.DAY)),
+            "2": _week_and_model(60, 99.4, _iso_at(t0 + 3 * self.DAY)),
+            "3": _week_and_model(30, 99.6, _iso_at(t0 + 1 * self.DAY)),
+        })
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() == 3, "both are over the line, so the soonest reset wins"
+
+    @pytest.mark.parametrize("line,left,active", [
+        (99.0, 96.0, 99.2),   # the bar used to release only at 99.7
+        (99.0, 97.5, 99.2),   # ... or never: the exit came at 100, as an escape
+        (90.0, 80.0, 90.5),   # a line lowered for a fast burn
+    ])
+    def test_a_threshold_exit_goes_back_to_a_healthy_account_it_came_from(
+        self, temp_home, line, left, active
+    ):
+        h = self._harness(temp_home, accounts=2, threshold=line)
+        t0 = h.clock.now
+        a_reset, b_reset = _iso_at(t0 + 3 * self.DAY), _iso_at(t0 + 5 * 3600)
+        # B's week resets in five hours with room to spare: consume-first moves A -> B.
+        assert self._tick(h, t0, {
+            "1": _week_and_model(50, left, a_reset),
+            "2": _week_and_model(40, active - 5, b_reset),
+        }) is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+        # B crosses the line. A is the only account under it, and it is where we came from.
+        outcome = self._tick(h, t0 + 300, {
+            "1": _week_and_model(50, left, a_reset),
+            "2": _week_and_model(40, active, b_reset),
+        })
+        assert outcome is TickOutcome.SWITCHED, self._last(h, "no-switch")
+        assert self._last(h, "switch")["trigger"] == "proactive"
+        assert h.active_number() == 1
+        # It does not go straight back: B is over the line.
+        for minute in (6, 8, 12):
+            assert self._tick(h, t0 + minute * 60, {
+                "1": _week_and_model(50, left, a_reset),
+                "2": _week_and_model(40, active, b_reset),
+            }) is not TickOutcome.SWITCHED
+        assert h.active_number() == 1
+
+    def test_only_the_threshold_exit_is_released(self, temp_home):
+        """An optional consume-first move may still not undo the move before it."""
+        h = self._harness(temp_home, accounts=2)
+        state = {"lastSwitchFrom": 1, "lastSwitchTo": "2"}
+        headroom = {"1": 4.0, "2": 0.8}   # the left account is under the 99% line
+        bar = lambda trigger, active: h.engine._no_return_account(
+            trigger, state, headroom, active, False, h.settings, "2")
+        assert bar("proactive", 0.8) is None
+        assert bar("consume-first", 3.0) == "1"
+        # Over the line, the left account stays barred on a threshold exit too.
+        headroom["1"] = 0.6
+        assert bar("proactive", 0.8) == "1"
+        # An unreadable left account is not known to be under the line.
+        headroom["1"] = None
+        assert bar("proactive", 0.8) == "1"
+
+    def test_the_unhealthy_count_does_not_follow_a_failover(self, temp_home):
+        h = self._harness(temp_home)
+        t0 = h.clock.now
+        good = _week_and_model(20, 20, _iso_at(t0 + 3 * self.DAY))
+        outcomes = [
+            self._tick(h, t0 + minute * 60, {"1": None, "2": good, "3": good})
+            for minute in range(3)
+        ]
+        assert outcomes[-1] is TickOutcome.SWITCHED
+        assert self._last(h, "switch")["trigger"] == "failover"
+        landed = str(h.active_number())
+        assert landed != "1"
+        # One unreadable tick on the account it landed on is that account's first.
+        usage = {"1": good, "2": good, "3": good, landed: None}
+        assert self._tick(h, t0 + 180, usage) is not TickOutcome.SWITCHED
+        assert str(h.active_number()) == landed
+        assert h.state()["health"]["unhealthyTicks"] == 1
