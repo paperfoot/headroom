@@ -65,9 +65,11 @@ public struct LiveUsageSnapshot: Codable, Equatable, Sendable {
     /// Longest model name kept: it is a gauge label, not free text.
     static let maximumModelNameLength = 24
 
-    /// Reads Claude's usage payload. The five-hour and all-models windows come from
-    /// `five_hour` and `seven_day`; each model's weekly limit is an entry of `limits` that
-    /// names a model, with `model_scoped` as the same list in an older form.
+    /// Reads Claude's usage payload, as the account engine does (`build_usage_result`). The
+    /// five-hour and all-models windows come from `five_hour` and `seven_day`, or from their
+    /// `limits` entries (`session`, `weekly_all`) when those keys are unusable. Each model's
+    /// weekly limit is an entry of `limits` that names a model, with `model_scoped` as the
+    /// same list in another form.
     public static func decode(_ data: Data, email: String, now: Date) throws -> Self {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               root.keys.contains("five_hour") || root.keys.contains("seven_day") || root["limits"] is [Any] else {
@@ -97,18 +99,21 @@ public struct LiveUsageSnapshot: Codable, Equatable, Sendable {
         }
         for limit in limits {
             let model = (limit["scope"] as? [String: Any])?["model"] as? [String: Any]
-            add(model?["display_name"], window(limit, percent: "percent"))
+            let name = (model?["display_name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? model?["id"] as? String
+            add(name, window(limit, percent: "percent"))
         }
         if models.isEmpty {
             for entry in (root["model_scoped"] as? [Any] ?? []).compactMap({ $0 as? [String: Any] }) {
                 add(entry["display_name"], window(entry, percent: "utilization"))
             }
         }
-        // The week for all models, should `seven_day` stop being sent the way `five_hour` did.
-        let week = window(root["seven_day"], percent: "utilization")
-            ?? limits.first { $0["kind"] as? String == "weekly_all" }.flatMap { window($0, percent: "percent") }
-        return Self(email: email, fetchedAt: now, fiveHour: window(root["five_hour"], percent: "utilization"),
-                    sevenDay: week, models: models)
+        // A plan without a five-hour limit sends neither `five_hour` nor a `session` entry.
+        func legacy(_ key: String, orLimit kind: String) -> LiveUsageWindow? {
+            window(root[key], percent: "utilization")
+                ?? limits.first { $0["kind"] as? String == kind }.flatMap { window($0, percent: "percent") }
+        }
+        return Self(email: email, fetchedAt: now, fiveHour: legacy("five_hour", orLimit: "session"),
+                    sevenDay: legacy("seven_day", orLimit: "weekly_all"), models: models)
     }
 }
 

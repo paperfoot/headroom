@@ -216,8 +216,11 @@ struct LiveUsageTests {
         #expect(snapshot.sevenDay?.percent == 64)
         #expect(snapshot.sevenDay?.resetsAt != nil)
 
-        let withoutLegacyKeys = try LiveUsageSnapshot.decode(data(#"{"limits":[{"kind":"weekly_all","percent":7,"scope":null}]}"#), email: "a", now: now)
+        let withoutLegacyKeys = try LiveUsageSnapshot.decode(data(#"{"limits":[{"kind":"session","percent":31,"scope":null},{"kind":"weekly_all","percent":7,"scope":null},{"kind":"weekly_scoped","percent":50,"scope":{"model":{"id":"claude-fable-5-2","display_name":null}}}]}"#), email: "a", now: now)
+        #expect(withoutLegacyKeys.fiveHour?.percent == 31)
         #expect(withoutLegacyKeys.sevenDay?.percent == 7)
+        // A model known only by its id still gets its gauge.
+        #expect(withoutLegacyKeys.models.map(\.name) == ["claude-fable-5-2"])
         // The legacy figure wins while it is sent.
         let legacy = try LiveUsageSnapshot.decode(data(#"{"seven_day":{"utilization":20},"limits":[{"kind":"weekly_all","percent":64,"scope":null}]}"#), email: "a", now: now)
         #expect(legacy.sevenDay?.percent == 20)
