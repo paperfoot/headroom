@@ -172,6 +172,16 @@ private final class MenuRefreshHarness {
         check(apart?.rows.last?.trailing != nil && apart?.rows.last?.trailing != apart?.rows.first?.trailing,
               "a model's own reset time is shown when it differs from the week's")
 
+        // Auto-switch with nowhere to go says so under the accounts, and the line follows later ticks.
+        check(item(in: menu, id: "claude.auto-switch") == nil, "no auto-switch line while it can keep work going")
+        input.autoSwitchWarning = "No usable account has Fable left \u{00B7} other models still work"
+        let warned = MenuBuilder.build(input, target: target, actions: actions())
+        check(detailText(in: warned, id: "claude.auto-switch") == input.autoSwitchWarning, "the auto-switch line is shown")
+        input.autoSwitchWarning = "Every account is at its limit \u{00B7} auto-switch has nowhere to go"
+        MenuBuilder.updateVisible(in: warned, input: input)
+        check(detailText(in: warned, id: "claude.auto-switch") == input.autoSwitchWarning, "an open menu follows the latest tick")
+        input.autoSwitchWarning = nil
+
         // A menu on screen keeps its frame when a reading adds a limit.
         let height = weekly?.frame.height
         input.liveUsage["alpha"] = input.liveUsage["beta"].map {

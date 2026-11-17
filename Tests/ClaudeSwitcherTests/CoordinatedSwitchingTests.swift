@@ -29,6 +29,35 @@ struct CoordinatedSwitchingTests {
         #expect(reading.sevenDay?.percent == 82)
         #expect(reading.models.isEmpty)
     }
+    @Test func theMenuSaysWhenAutoSwitchCannotKeepWorkGoing() throws {
+        func result(_ json: String) throws -> AutoSwitchResult {
+            try JSONDecoder().decode(AutoSwitchResult.self, from: Data(json.utf8))
+        }
+        let staying = try result(#"{"ok":true,"switched":false,"reason":"held","hold":"manual"}"#)
+        #expect(AutoSwitchResult.warning(for: staying, failures: 0) == nil)
+        let moved = try result(#"{"ok":true,"switched":true,"codeEmail":"one@example.com","modelSpent":"Fable"}"#)
+        #expect(AutoSwitchResult.warning(for: moved, failures: 0) == nil)
+
+        let spent = try result(#"{"ok":true,"switched":false,"reason":"all_exhausted"}"#)
+        #expect(AutoSwitchResult.warning(for: spent, failures: 0) == "Every account is at its limit \u{00B7} auto-switch has nowhere to go")
+        let fable = try result(#"{"ok":true,"switched":false,"reason":"held","modelSpent":"Fable"}"#)
+        #expect(AutoSwitchResult.warning(for: fable, failures: 0) == "No usable account has Fable left \u{00B7} other models still work")
+        let odd = try result(#"{"ok":true,"switched":false,"reason":"held","modelSpent":"\#(String(repeating: "x", count: 60))"}"#)
+        #expect(AutoSwitchResult.warning(for: odd, failures: 0) == nil)
+
+        // One tick without a decision can be a slow engine; three in a row is worth saying.
+        let failed = try result(#"{"ok":true,"switched":false,"reason":"auto_switch_failed"}"#)
+        let refused = try result(#"{"ok":false,"switched":false,"error":"code_switch_failed"}"#)
+        for outcome in [failed, refused, nil] {
+            #expect(AutoSwitchResult.isFailure(outcome))
+            #expect(AutoSwitchResult.warning(for: outcome, failures: 2) == nil)
+            #expect(AutoSwitchResult.warning(for: outcome, failures: 3) == "Auto-switch cannot read usage \u{00B7} it keeps trying")
+        }
+        #expect(!AutoSwitchResult.isFailure(staying))
+        // Code moved but Chrome did not follow: the switch notice covers that, not this line.
+        let partial = try result(#"{"ok":false,"switched":true,"codeEmail":"one@example.com"}"#)
+        #expect(!AutoSwitchResult.isFailure(partial))
+    }
     @Test func undatedCacheIsNeverPresentedAsFresh() throws {
         let json = #"{"accounts":[{"email":"one@example.com","active":false,"usageStatus":"ok","usage":{"fiveHour":{"pct":17}}}],"browser":{"ok":false}}"#
         let snapshot = try JSONDecoder().decode(CoordinatedSnapshot.self, from: Data(json.utf8))

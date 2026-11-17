@@ -94,6 +94,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Watches a partial switch until Chrome signs in to the selected account.
     private var chromeFinishTimer: Timer?
     private var isAutoSwitching = false
+    /// Shown in the menu while auto-switch has nowhere to go or cannot read usage.
+    private var autoSwitchWarning: String?
+    /// Ticks in a row that produced no decision.
+    private var autoSwitchFailures = 0
 
     private static let actions = MenuBuilder.Actions(
         selectProfile: #selector(selectProfile(_:)),
@@ -264,6 +268,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             switching: isSwitchingAccount || desktopHistory?.busy == true,
             switchMessage: switchMessage,
             loginWarning: loginWarning,
+            autoSwitchWarning: autoSwitchWarning,
             chromeSignInEmails: chromeSignInEmails,
             historyEnabled: desktopHistory?.enabled ?? false,
             historyBusy: desktopHistory?.busy ?? false,
@@ -1614,7 +1619,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             config.autoSwitch.toggle()
             return
         }
+        autoSwitchFailures = 0
+        autoSwitchWarning = nil
         scheduleAutoSwitch()
+    }
+
+    /// Keeps the menu's auto-switch line in step with the latest tick. A tick that moved
+    /// Code, or decided to stay, clears it.
+    private func noteAutoSwitch(_ result: AutoSwitchResult?) {
+        autoSwitchFailures = AutoSwitchResult.isFailure(result) ? autoSwitchFailures + 1 : 0
+        let warning = AutoSwitchResult.warning(for: result, failures: autoSwitchFailures)
+        guard warning != autoSwitchWarning else { return }
+        autoSwitchWarning = warning
+        rebuildIfVisible()
     }
 
     // MARK: - Automatic switching
@@ -1646,6 +1663,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 try? CoordinatedSwitching.autoTick(setup: setup, threshold: threshold)
             }.value
             isAutoSwitching = false
+            noteAutoSwitch(result)
             guard let result else {
                 // No readable answer: re-read the real state so the menu never shows a stale login.
                 refreshCoordinatedAccounts(setup: setup, force: true)

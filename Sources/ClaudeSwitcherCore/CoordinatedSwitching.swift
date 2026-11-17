@@ -222,6 +222,34 @@ public struct AutoSwitchResult: Decodable, Sendable {
     public let extensionError: String?
     /// When the companion recorded the switch, in Unix seconds; matches the saved state.
     public let selectedAt: Double?
+    /// A model whose own weekly limit is spent on this account while auto-switch found no
+    /// account to move to, such as "Fable". The week alone decided this tick.
+    public let modelSpent: String?
+
+    /// Ticks in a row without a decision before the menu says so: one can be a slow engine.
+    public static let failuresBeforeWarning = 3
+
+    /// The tick produced no decision: the helper gave no answer, or the engine failed.
+    public static func isFailure(_ result: AutoSwitchResult?) -> Bool {
+        guard let result else { return true }
+        return result.switched != true && (!result.ok || result.reason == "auto_switch_failed")
+    }
+
+    /// What the menu says while auto-switch cannot keep work going; `nil` when it can.
+    /// `failures` counts the ticks in a row that produced no decision, this one included.
+    public static func warning(for result: AutoSwitchResult?, failures: Int) -> String? {
+        if isFailure(result) {
+            return failures >= failuresBeforeWarning ? "Auto-switch cannot read usage \u{00B7} it keeps trying" : nil
+        }
+        guard let result, result.switched != true else { return nil }
+        if result.reason == "all_exhausted" {
+            return "Every account is at its limit \u{00B7} auto-switch has nowhere to go"
+        }
+        if let model = result.modelSpent, !model.isEmpty, model.count <= LiveUsageSnapshot.maximumModelNameLength {
+            return "No usable account has \(model) left \u{00B7} other models still work"
+        }
+        return nil
+    }
 }
 
 /// A coordinator run that produced no usable result. `description` may end with the
