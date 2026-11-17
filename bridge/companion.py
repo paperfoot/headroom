@@ -341,6 +341,10 @@ def extension_follow(email):
 
 AUTO_THRESHOLD_RANGE = (50.0, 99.9)
 AUTO_COOLDOWN = 120
+# An account also counts as spent when a weekly limit for one model is, such as Fable's,
+# which can fill while the week for all models still has room. 'all' takes every such
+# limit an account reports, so a renamed or new one cannot go unseen.
+AUTO_MODELS = 'all'
 # Parallel agents can spend a point a minute, and usage is only polled every minute or
 # three, so a fixed 99% is seen after the limit has already stopped them. The exit moves
 # forward by what the recent pace spends in BURN_LEAD; a landing then needs that much room too.
@@ -524,10 +528,11 @@ def auto_events(threshold, timeout, hold=False):
     Room means usage under `threshold`, which is why the app's default sits near the limit.
     A target can arrive just under it, so the cooldown between proactive moves is two
     minutes rather than the engine's default five, or the account could run into its hard limit first.
+    Usage is the fullest of an account's limits: the week and each model's own week (--model).
     """
     result = subprocess.run([engine(), 'auto', '--once', '--json', '--strategy', 'consume-first',
                              '--cooldown', str(AUTO_COOLDOWN), '--threshold', f'{threshold:g}', '--urgent-only',
-                             *(['--hold'] if hold else [])],
+                             '--model', AUTO_MODELS, *(['--hold'] if hold else [])],
                             env=clean_environment(), stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout)
     # Exit 0: switched. 2: nothing to do. 3: no viable target. 1: the engine failed.
     if result.returncode not in (0, 2, 3):
@@ -551,6 +556,18 @@ def active_used(events, email):
     if not isinstance(headroom, (int, float)) or str(active.get('email', '')).lower() != (email or ''):
         return None
     return round(100 - headroom)
+
+
+def active_window(events, email):
+    """Which of the active account's limits is fullest: '7d', '5h' or a model such as 'Fable'."""
+    poll = next((event for event in events if event.get('event') == 'poll'), {})
+    active = poll.get('active') if isinstance(poll.get('active'), dict) else {}
+    windows = (poll.get('windowsPct') or {}).get(str(active.get('number')))
+    if not isinstance(windows, dict) or str(active.get('email', '')).lower() != (email or ''):
+        return None
+    used = {name: value for name, value in windows.items()
+            if isinstance(name, str) and isinstance(value, (int, float)) and not isinstance(value, bool)}
+    return max(used, key=used.get) if used else None
 
 
 def safe_identity(deadline):
@@ -607,8 +624,9 @@ def auto_tick(threshold, deadline=None, events=None):
             else:
                 reason = next((str(event.get('reason')) for event in events if event.get('event') == 'no-switch'),
                               'no_action')
+            window = active_window(events, previous)
             note_decision({'reason': reason, 'account': previous, 'hold': hold,
-                           'used': active_used(events, previous),
+                           'used': active_used(events, previous), **({'window': window} if window else {}),
                            **({'leaveAt': math.floor(leave)} if leave < threshold else {})})
             if reason in ('auto_switch_failed', 'all_exhausted'):
                 return {'ok': True, 'switched': False, 'reason': reason}

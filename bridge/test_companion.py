@@ -1551,6 +1551,24 @@ class AutoTickTests(unittest.TestCase):
             self.assertEqual(len(decisions), 1)
             self.assertEqual(decisions[0].kwargs, {"reason": "held", "hold": "manual", "used": 88})
 
+    def test_a_decision_names_the_limit_that_was_fullest(self):
+        # The week has room, but the model's own week is spent: that is why the account is left.
+        events = [{"event": "poll", "active": {"number": 2, "email": OLD_EMAIL}, "headroomPct": {"2": 0.0},
+                   "windowsPct": {"2": {"7d": 82.0, "Fable": 100.0}, "3": {"7d": 99.0, "Fable": 85.0}}},
+                  {"event": "no-switch", "reason": "no-viable-target"}]
+        with mock.patch.object(companion, "auto_events", return_value=events), \
+                mock.patch.object(companion, "hold_reason", return_value=None), \
+                mock.patch.object(companion.event_log, "emit") as emit:
+            self.code_identity.side_effect = None
+            self.code_identity.return_value = OLD_EMAIL
+            companion.auto_tick(95)
+        decision = next(call for call in emit.call_args_list if call.args[1] == "auto_decision")
+        self.assertEqual(decision.kwargs["used"], 100)
+        self.assertEqual(decision.kwargs["window"], "Fable")
+        self.assertEqual(companion.active_window(events, "someone-else@example.com"), None)
+        self.assertEqual(companion.active_window([{"event": "poll", "active": {"number": 2, "email": OLD_EMAIL},
+                                                   "windowsPct": {"2": {"7d": None, "Fable": True}}}], OLD_EMAIL), None)
+
     def test_a_fast_burn_brings_the_exit_forward_and_a_slow_one_keeps_the_threshold(self):
         # Tonight's run: 92% to 97% in seven minutes on one account.
         fast = [[0, 3, 92.0], [180, 3, 94.0], [300, 3, 95.0], [420, 3, 97.0]]
@@ -1627,7 +1645,8 @@ class AutoTickTests(unittest.TestCase):
             events = companion.auto_events(95.0, timeout=30)
         self.assertEqual([event["event"] for event in events], ["poll", "no-switch"])
         self.assertEqual(run.call_args.args[0], ["/bin/cswap", "auto", "--once", "--json", "--strategy", "consume-first",
-                                                 "--cooldown", "120", "--threshold", "95", "--urgent-only"])
+                                                 "--cooldown", "120", "--threshold", "95", "--urgent-only",
+                                                 "--model", "all"])
         with mock.patch.object(companion, "configuration", return_value={"engine": "/bin/cswap"}), \
                 mock.patch.object(companion.subprocess, "run", return_value=completed) as run:
             companion.auto_events(95.0, timeout=30, hold=True)

@@ -25,6 +25,7 @@ accessibility_needed timeout helper_missing helper_timeout helper_failed'''.spli
 STEPS = {'capture_session', 'clear_cookies', 'restore_cookies', 'verify_identity', 'activate_code', 'save_session', 'connect'}
 HOLDS = {'pinned', 'manual', 'agents'}
 REASON = re.compile(r'[a-z][a-z_-]{0,39}')
+WINDOW = re.compile(r'[A-Za-z0-9][A-Za-z0-9 .-]{0,23}')
 PROBES = {'verified', 'unauthorized', 'forbidden', 'network_error', 'rate_limited', 'server_error', 'invalid_response', 'identity_mismatch', 'signed_out'}
 
 
@@ -55,6 +56,8 @@ def _record(event, fields):
             record[key] = value
         elif key in ('used', 'leaveAt') and type(value) is int and 0 <= value <= 100:
             record[key] = value
+        elif key == 'window' and isinstance(value, str) and WINDOW.fullmatch(value):
+            record[key] = value  # the limit that was fullest: '7d', '5h' or a model such as 'Fable'
     return record
 
 
