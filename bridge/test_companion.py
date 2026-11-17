@@ -1587,10 +1587,12 @@ class AutoTickTests(unittest.TestCase):
         self.assertEqual([call.kwargs for call in engine.call_args_list],
                          [{"hold": True}, {"hold": True, "models": None}])
         self.assertEqual(engine.call_args_list[0].args[0], engine.call_args_list[1].args[0])
-        self.assertEqual(result["reason"], "cooldown")
+        self.assertEqual(result, {"ok": True, "switched": False, "reason": "cooldown", "hold": "manual",
+                                  "modelSpent": "Fable"})
         # One decision and one reading for the tick, both from the run that decided.
         decisions = [call.kwargs for call in emit.call_args_list if call.args[1] == "auto_decision"]
-        self.assertEqual(decisions, [{"reason": "cooldown", "hold": "manual", "used": 99, "window": "7d"}])
+        self.assertEqual(decisions, [{"reason": "cooldown", "hold": "manual", "used": 99, "window": "7d",
+                                      "model": "Fable"}])
         stored = json.loads((self.base / "burn.json").read_text())
         self.assertEqual([sample[1:] for sample in stored], [[2, 99.0]])
 
@@ -1598,18 +1600,18 @@ class AutoTickTests(unittest.TestCase):
         def poll(windows):
             return [{"event": "poll", "active": {"number": 2, "email": OLD_EMAIL}, "windowsPct": {"2": windows}},
                     {"event": "no-switch", "reason": "no-qualifying-candidate"}]
-        self.assertTrue(companion.stuck_on_model_limit(poll({"7d": 82.0, "Fable": 100.0})))
-        self.assertTrue(companion.stuck_on_model_limit(poll({"Fable": 100.0, "Opus": 40.0})))
+        self.assertEqual(companion.spent_model_limit(poll({"7d": 82.0, "Fable": 100.0})), "Fable")
+        self.assertEqual(companion.spent_model_limit(poll({"Opus": 100.0, "Fable": 100.0, "7d": 40.0})), "Fable")
         # The week or the five-hour limit is spent too: no other model can work there either.
-        self.assertFalse(companion.stuck_on_model_limit(poll({"7d": 100.0, "Fable": 100.0})))
-        self.assertFalse(companion.stuck_on_model_limit(poll({"5h": 100.0, "7d": 20.0, "Fable": 100.0})))
+        self.assertIsNone(companion.spent_model_limit(poll({"7d": 100.0, "Fable": 100.0})))
+        self.assertIsNone(companion.spent_model_limit(poll({"5h": 100.0, "7d": 20.0, "Fable": 100.0})))
         # Nothing spent, an unreadable reading, or a move already made.
-        self.assertFalse(companion.stuck_on_model_limit(poll({"7d": 82.0, "Fable": 99.9})))
-        self.assertFalse(companion.stuck_on_model_limit(poll({"7d": None, "Fable": True})))
-        self.assertFalse(companion.stuck_on_model_limit([{"event": "poll", "active": {"number": 2}}]))
-        self.assertFalse(companion.stuck_on_model_limit([]))
+        self.assertIsNone(companion.spent_model_limit(poll({"7d": 82.0, "Fable": 99.9})))
+        self.assertIsNone(companion.spent_model_limit(poll({"7d": None, "Fable": True})))
+        self.assertIsNone(companion.spent_model_limit([{"event": "poll", "active": {"number": 2}}]))
+        self.assertIsNone(companion.spent_model_limit([]))
         moved = poll({"7d": 82.0, "Fable": 100.0}) + [{"event": "switch", "trigger": "at-limit"}]
-        self.assertFalse(companion.stuck_on_model_limit(moved))
+        self.assertIsNone(companion.spent_model_limit(moved))
 
     def test_the_engine_is_asked_once_when_a_model_limit_has_room_somewhere(self):
         events = [{"event": "poll", "active": {"number": 2, "email": OLD_EMAIL}, "headroomPct": {"2": 15.0},
@@ -1657,7 +1659,8 @@ class AutoTickTests(unittest.TestCase):
         self.assertEqual(leave, 91.7)  # 5 points in 6 minutes: leave about 8 points early
         self.assertEqual(engine.call_args.kwargs, {"hold": True})
         decision = next(call for call in emit.call_args_list if call.args[1] == "auto_decision")
-        self.assertEqual(decision.kwargs["leaveAt"], math.floor(leave))
+        # 91.7 is first reached by a reading of 92, so that is the exit the log shows.
+        self.assertEqual(decision.kwargs["leaveAt"], 92)
         stored = json.loads((self.base / "burn.json").read_text())
         self.assertEqual(len(stored), 3)  # the sample older than the window is dropped
         self.assertEqual(stored[-1][1:], [2, 98.0])
@@ -1714,6 +1717,11 @@ class AutoTickTests(unittest.TestCase):
                 mock.patch.object(companion.subprocess, "run", return_value=completed) as run:
             companion.auto_events(95.0, timeout=30, hold=True)
         self.assertEqual(run.call_args.args[0][-1], "--hold")
+        # Exit 0 means the engine switched; a lost switch line must still get the login re-read.
+        silent = types.SimpleNamespace(returncode=0, stdout=b'{"event":"poll"}\n', stderr=b"")
+        with mock.patch.object(companion, "configuration", return_value={"engine": "/bin/cswap"}), \
+                mock.patch.object(companion.subprocess, "run", return_value=silent):
+            self.assertEqual([event["event"] for event in companion.auto_events(95.0, timeout=30)], ["poll", "switch"])
         failed = types.SimpleNamespace(returncode=1, stdout=b"", stderr=b"")
         with mock.patch.object(companion, "configuration", return_value={"engine": "/bin/cswap"}), \
                 mock.patch.object(companion.subprocess, "run", return_value=failed):
@@ -1727,6 +1735,65 @@ class AutoTickTests(unittest.TestCase):
         self.assertTrue(result["switched"])
         self.assertEqual(result["codeEmail"], TARGET_EMAIL)
         self.assertEqual(self.browser_request.call_args.args[:2], ("switch", TARGET_EMAIL))
+
+    def test_an_unreadable_login_is_not_taken_for_a_move(self):
+        failing = mock.patch.object(companion, "auto_events", side_effect=RuntimeError("auto_switch_failed"))
+        quiet = {"ok": True, "switched": False, "reason": "auto_switch_failed"}
+        # Unreadable before the engine failed, readable after: Code never moved.
+        self.code_identity.side_effect = [RuntimeError("timeout"), OLD_EMAIL]
+        with failing:
+            self.assertEqual(companion.auto_tick(95), quiet)
+        # Readable before, unreadable after.
+        self.code_identity.side_effect = [OLD_EMAIL, RuntimeError("timeout")]
+        with failing:
+            self.assertEqual(companion.auto_tick(95), quiet)
+        self.browser_request.assert_not_called()
+        self.assertFalse(self.state.exists())
+
+    def test_a_switch_is_followed_even_when_the_login_cannot_be_read(self):
+        # The engine moved Code; neither read of the login worked. Chrome still has to follow.
+        self.code_identity.side_effect = RuntimeError("timeout")
+        with mock.patch.object(companion, "auto_events", return_value=self.switched_to(TARGET_EMAIL.upper())), \
+                mock.patch.object(companion, "hold_reason", return_value=None):
+            result = companion.auto_tick(95)
+        self.assertTrue(result["switched"])
+        self.assertEqual(result["codeEmail"], TARGET_EMAIL)
+        self.assertEqual(self.browser_request.call_args.args[:2], ("switch", TARGET_EMAIL))
+        self.assertEqual(self.stored_state()["codeEmail"], TARGET_EMAIL)
+
+    def test_a_pace_that_cannot_be_saved_does_not_strand_chrome(self):
+        self.code_identity.side_effect = [OLD_EMAIL, TARGET_EMAIL]
+        with mock.patch.object(companion, "auto_events", return_value=self.switched_to(TARGET_EMAIL)), \
+                mock.patch.object(companion, "hold_reason", return_value=None), \
+                mock.patch.object(companion, "note_burn", side_effect=OSError("disk full")):
+            result = companion.auto_tick(95)
+        self.assertTrue(result["switched"])
+        self.assertEqual(self.browser_request.call_args.args[:2], ("switch", TARGET_EMAIL))
+
+    def test_the_log_says_why_usage_was_unreadable_and_what_triggered_a_switch(self):
+        unread = [{"event": "poll", "active": {"number": 2, "email": OLD_EMAIL}, "headroomPct": {"2": None},
+                   "fetchErrors": {"2": "foreign credential", "3": "http-429"}},
+                  {"event": "no-switch", "reason": "active-usage-unknown"}]
+        with mock.patch.object(companion, "auto_events", return_value=unread), \
+                mock.patch.object(companion, "hold_reason", return_value="manual"), \
+                mock.patch.object(companion.event_log, "emit") as emit:
+            companion.auto_tick(95)
+        decision = next(call.kwargs for call in emit.call_args_list if call.args[1] == "auto_decision")
+        self.assertEqual(decision, {"reason": "active-usage-unknown", "hold": "manual", "used": None,
+                                    "cause": "foreign credential"})
+        self.code_identity.side_effect = [OLD_EMAIL, TARGET_EMAIL]
+        failover = self.switched_to(TARGET_EMAIL)
+        failover[1]["trigger"] = "failover"
+        with mock.patch.object(companion, "auto_events", return_value=failover), \
+                mock.patch.object(companion, "hold_reason", return_value="manual"), \
+                mock.patch.object(companion.event_log, "emit") as emit:
+            companion.auto_tick(95)
+        finished = next(call.kwargs for call in emit.call_args_list if call.args[1] == "switch_finished")
+        self.assertEqual(finished["reason"], "failover")
+
+    def test_usage_past_the_limit_is_logged_as_full(self):
+        over = [{"event": "poll", "active": {"number": 2, "email": OLD_EMAIL}, "headroomPct": {"2": -3.0}}]
+        self.assertEqual(companion.active_used(over, OLD_EMAIL), 100)
 
     def test_an_engine_failure_without_a_move_is_quiet(self):
         with mock.patch.object(companion, "auto_events", side_effect=RuntimeError("auto_switch_failed")):

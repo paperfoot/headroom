@@ -554,6 +554,9 @@ def auto_events(threshold, timeout, hold=False, models=AUTO_MODELS):
             continue
         if isinstance(event, dict):
             events.append(event)
+    if result.returncode == 0 and not any(event.get('event') == 'switch' for event in events):
+        # The engine says it switched but its switch line was lost: have the login re-read.
+        events.append({'event': 'switch'})
     return events
 
 
@@ -564,7 +567,7 @@ def active_used(events, email):
     headroom = (poll.get('headroomPct') or {}).get(str(active.get('number')))
     if not isinstance(headroom, (int, float)) or str(active.get('email', '')).lower() != (email or ''):
         return None
-    return round(100 - headroom)
+    return max(0, min(100, round(100 - headroom)))
 
 
 def active_window(events, email):
@@ -579,22 +582,33 @@ def active_window(events, email):
     return max(used, key=used.get) if used else None
 
 
-def stuck_on_model_limit(events):
-    """True when the engine kept Code on an account whose only spent limit is a model's.
+def spent_model_limit(events):
+    """The model whose own limit is all that is spent on the account the engine kept Code on.
 
     That happens once no account it could move to has room on that model. Work on other
     models goes on, and from here only the week can stop it, so the week must decide.
+    None when the engine moved, or when the week or the five-hour limit is spent too.
     """
     if any(event.get('event') == 'switch' for event in events):
-        return False
+        return None
     poll = next((event for event in events if event.get('event') == 'poll'), {})
     active = poll.get('active') if isinstance(poll.get('active'), dict) else {}
     windows = (poll.get('windowsPct') or {}).get(str(active.get('number')))
     if not isinstance(windows, dict):
-        return False
-    spent = {name for name, value in windows.items()
-             if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 100}
-    return bool(spent) and not spent & ACCOUNT_WINDOWS
+        return None
+    spent = sorted(name for name, value in windows.items()
+                   if isinstance(name, str) and isinstance(value, (int, float))
+                   and not isinstance(value, bool) and value >= 100)
+    return spent[0] if spent and not ACCOUNT_WINDOWS.intersection(spent) else None
+
+
+def unread_cause(events):
+    """Why the active account's usage could not be read, as the engine names it: 'http-429',
+    'timeout', 'foreign credential'... None when it was read or the engine gave no cause."""
+    poll = next((event for event in events if event.get('event') == 'poll'), {})
+    active = poll.get('active') if isinstance(poll.get('active'), dict) else {}
+    cause = (poll.get('fetchErrors') or {}).get(str(active.get('number')))
+    return cause if isinstance(cause, str) else None
 
 
 def safe_identity(deadline):
@@ -626,6 +640,7 @@ def auto_tick(threshold, deadline=None, events=None):
         engine_failed = False
         hold = None
         leave = threshold
+        model_spent = None
         if events is None:
             hold = hold_reason(previous)
             # A hold only stops early moves; leaving before the limit is never held.
@@ -633,17 +648,27 @@ def auto_tick(threshold, deadline=None, events=None):
             leave = leave_at(threshold, burn)
             try:
                 events = auto_events(leave, deadline.timeout(deadlines.AUTO_ENGINE_TIMEOUT), hold=hold is not None)
-                if stuck_on_model_limit(events):
+                model_spent = spent_model_limit(events)
+                if model_spent:
                     # With every model limit counted, this account and all it could move to
                     # read as spent, and the engine would let its week run out too.
                     events = auto_events(leave, deadline.timeout(deadlines.AUTO_ENGINE_TIMEOUT),
                                          hold=hold is not None, models=None)
             except (RuntimeError, OSError, subprocess.TimeoutExpired, deadlines.DeadlineExceeded):
                 engine_failed, events = True, []
-            note_burn(burn, events)
+            try:
+                note_burn(burn, events)
+            except OSError:
+                pass  # a pace that cannot be saved must not keep Chrome from following a switch
         switch = next((event for event in events if event.get('event') == 'switch' and not event.get('dryRun')), None)
         trigger = switch.get('trigger') if switch and isinstance(switch.get('trigger'), str) else None
         current = safe_identity(deadline) if (switch or engine_failed) else previous
+        if current is None:
+            # An unreadable login is not a move: take the engine's word for where Code went.
+            target = (switch.get('to') or {}).get('email') if switch and isinstance(switch.get('to'), dict) else None
+            current = target.lower() if isinstance(target, str) and target else previous
+        if previous is None and not switch:
+            previous = current  # nothing says Code moved, so an unread login then is not a move either
         if current == previous:
             if switch is not None:
                 # The engine reported a switch that did not land; nothing moved.
@@ -657,12 +682,17 @@ def auto_tick(threshold, deadline=None, events=None):
                 reason = next((str(event.get('reason')) for event in events if event.get('event') == 'no-switch'),
                               'no_action')
             window = active_window(events, previous)
+            cause = unread_cause(events)
+            # Readings are whole percents, so the exit shown is the first one at or past the line.
             note_decision({'reason': reason, 'account': previous, 'hold': hold,
                            'used': active_used(events, previous), **({'window': window} if window else {}),
-                           **({'leaveAt': math.floor(leave)} if leave < threshold else {})})
+                           **({'model': model_spent} if model_spent else {}),
+                           **({'cause': cause} if cause else {}),
+                           **({'leaveAt': math.ceil(leave)} if leave < threshold else {})})
+            spent = {'modelSpent': model_spent} if model_spent else {}
             if reason in ('auto_switch_failed', 'all_exhausted'):
-                return {'ok': True, 'switched': False, 'reason': reason}
-            return {'ok': True, 'switched': False, 'reason': reason, **({'hold': hold} if hold else {})}
+                return {'ok': True, 'switched': False, 'reason': reason, **spent}
+            return {'ok': True, 'switched': False, 'reason': reason, **({'hold': hold} if hold else {}), **spent}
         # Code moved. Chrome follows the login Code actually has now.
         moved = {'switched': True, 'codeEmail': current, 'previousEmail': previous, 'trigger': trigger}
         try:
@@ -699,8 +729,10 @@ def auto_tick(threshold, deadline=None, events=None):
         followed = follow_extension(email, deadline) if ready and web.get('profileCount') else {}
         state.update(followed)
         atomic_json(STATE, state)
+        # The trigger tells a limit exit from a failover on unreadable usage.
         event_log.emit(BASE, 'switch_finished', scope='auto', ok=ready or web.get('error') == 'browser_missing',
-                       browserReady=ready, **({'browserError': web.get('error')} if not ready else {}))
+                       browserReady=ready, **({'browserError': web.get('error')} if not ready else {}),
+                       **({'reason': trigger} if trigger else {}))
         return {'ok': True, **moved, 'codeEmail': email, 'browserReady': ready, 'selectedAt': selected_at,
                 'browserError': None if ready else web.get('error', 'web_unavailable'), **followed}
 

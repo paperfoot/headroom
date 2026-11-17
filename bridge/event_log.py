@@ -25,7 +25,8 @@ accessibility_needed timeout helper_missing helper_timeout helper_failed'''.spli
 STEPS = {'capture_session', 'clear_cookies', 'restore_cookies', 'verify_identity', 'activate_code', 'save_session', 'connect'}
 HOLDS = {'pinned', 'manual', 'agents'}
 REASON = re.compile(r'[a-z][a-z_-]{0,39}')
-WINDOW = re.compile(r'[A-Za-z0-9][A-Za-z0-9 .-]{0,23}')
+WINDOW = re.compile(r'[A-Za-z0-9][A-Za-z0-9 ._()/-]{0,39}')
+CAUSE = re.compile(r'[A-Za-z][A-Za-z0-9 _-]{0,39}')
 PROBES = {'verified', 'unauthorized', 'forbidden', 'network_error', 'rate_limited', 'server_error', 'invalid_response', 'identity_mismatch', 'signed_out'}
 
 
@@ -56,8 +57,12 @@ def _record(event, fields):
             record[key] = value
         elif key in ('used', 'leaveAt') and type(value) is int and 0 <= value <= 100:
             record[key] = value
-        elif key == 'window' and isinstance(value, str) and WINDOW.fullmatch(value):
-            record[key] = value  # the limit that was fullest: '7d', '5h' or a model such as 'Fable'
+        elif key in ('window', 'model') and isinstance(value, str) and WINDOW.fullmatch(value):
+            # window: the limit that was fullest, '7d', '5h' or a model such as 'Fable'.
+            # model: the model whose limit is spent on every account, so the week decided.
+            record[key] = value
+        elif key == 'cause' and isinstance(value, str) and CAUSE.fullmatch(value):
+            record[key] = value  # why usage could not be read: 'http-429', 'timeout', 'foreign credential'
     return record
 
 
