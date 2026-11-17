@@ -2248,6 +2248,12 @@ class AutoSwitchEngine:
             state["leftTrigger"] = trigger
             atomic_write_json(self.state_path, state)
 
+        # The unhealthy count was earned by the account just left. Carried
+        # over, one unreadable tick on the new account failed over again at
+        # once instead of after `unhealthy_ticks` of its own.
+        self._unhealthy_ticks = 0
+        self._idle_hold_since = None
+
         self._emit(
             SwitchEvent(
                 trigger=trigger,
