@@ -111,11 +111,9 @@ public struct CoordinatedSnapshot: Decodable, Sendable {
             guard let value, value.pct.isFinite, (0...100).contains(value.pct) else { return nil }
             return LiveUsageWindow(percent: value.pct, resetsAt: Self.date(value.resetsAt))
         }
-        let models = usage.scoped.compactMap { model -> LiveUsageModelWindow? in
-            guard !model.name.isEmpty, model.name.count <= LiveUsageSnapshot.maximumModelNameLength,
-                  let window = window(Window(pct: model.pct, resetsAt: model.resetsAt)) else { return nil }
-            return LiveUsageModelWindow(name: model.name, window: window)
-        }
+        let models = LiveUsageSnapshot.modelWindows(usage.scoped.map {
+            ($0.name, window(Window(pct: $0.pct, resetsAt: $0.resetsAt)))
+        })
         return LiveUsageSnapshot(email: email, fetchedAt: fetchedAt,
                                  fiveHour: window(usage.fiveHour), sevenDay: window(usage.sevenDay), models: models)
     }

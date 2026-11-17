@@ -194,8 +194,12 @@ struct LiveUsageTests {
 
     @Test("Model limits are found in either list Claude sends, once each")
     func modelLimitsComeFromEitherList() throws {
+        // Listed twice, a model shows the fuller figure: that is the one that stops work first.
         let older = try LiveUsageSnapshot.decode(data(#"{"seven_day":{"utilization":10},"model_scoped":[{"display_name":"Fable","utilization":40,"resets_at":null},{"display_name":"fable","utilization":50}]}"#), email: "a", now: now)
-        #expect(older.models == [LiveUsageModelWindow(name: "Fable", window: LiveUsageWindow(percent: 40, resetsAt: nil))])
+        #expect(older.models == [LiveUsageModelWindow(name: "Fable", window: LiveUsageWindow(percent: 50, resetsAt: nil))])
+        let twice = try LiveUsageSnapshot.decode(data(#"{"seven_day":{"utilization":10},"limits":[{"kind":"session_scoped","percent":95,"scope":{"model":{"display_name":"Fable"}}},{"kind":"weekly_scoped","percent":20,"scope":{"model":{"display_name":"Fable"}}},{"kind":"weekly_scoped","percent":5,"scope":{"model":{"display_name":"Opus"}}}]}"#), email: "a", now: now)
+        #expect(twice.models.map(\.name) == ["Fable", "Opus"])
+        #expect(twice.models.map(\.window.percent) == [95, 5])
 
         let both = try LiveUsageSnapshot.decode(data(#"{"seven_day":{"utilization":10},"limits":[{"kind":"weekly_scoped","percent":70,"scope":{"model":{"display_name":"Fable"}}}],"model_scoped":[{"display_name":"Fable","utilization":40},{"display_name":"Opus","utilization":5}]}"#), email: "a", now: now)
         #expect(both.models.map(\.name) == ["Fable"])

@@ -65,6 +65,24 @@ public struct LiveUsageSnapshot: Codable, Equatable, Sendable {
     /// Longest model name kept: it is a gauge label, not free text.
     static let maximumModelNameLength = 24
 
+    /// Model limits as the app shows them: named, one per model, and where a model is
+    /// listed twice the fuller figure, which is the one that stops work first.
+    static func modelWindows(_ candidates: [(name: String?, window: LiveUsageWindow?)]) -> [LiveUsageModelWindow] {
+        var models: [LiveUsageModelWindow] = []
+        for candidate in candidates {
+            guard let name = candidate.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty,
+                  name.count <= maximumModelNameLength, let window = candidate.window else { continue }
+            if let index = models.firstIndex(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+                if window.percent > models[index].window.percent {
+                    models[index] = LiveUsageModelWindow(name: models[index].name, window: window)
+                }
+            } else {
+                models.append(LiveUsageModelWindow(name: name, window: window))
+            }
+        }
+        return models
+    }
+
     /// Reads Claude's usage payload, as the account engine does (`build_usage_result`). The
     /// five-hour and all-models windows come from `five_hour` and `seven_day`, or from their
     /// `limits` entries (`session`, `weekly_all`) when those keys are unusable. Each model's
@@ -90,22 +108,15 @@ public struct LiveUsageSnapshot: Codable, Equatable, Sendable {
             return LiveUsageWindow(percent: percent.doubleValue, resetsAt: reset)
         }
         let limits = (root["limits"] as? [Any] ?? []).compactMap { $0 as? [String: Any] }
-        var models: [LiveUsageModelWindow] = []
-        func add(_ name: Any?, _ window: LiveUsageWindow?) {
-            guard let name = (name as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty,
-                  name.count <= maximumModelNameLength, let window,
-                  !models.contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) else { return }
-            models.append(LiveUsageModelWindow(name: name, window: window))
-        }
-        for limit in limits {
+        var models = modelWindows(limits.map { limit in
             let model = (limit["scope"] as? [String: Any])?["model"] as? [String: Any]
             let name = (model?["display_name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? model?["id"] as? String
-            add(name, window(limit, percent: "percent"))
-        }
+            return (name, window(limit, percent: "percent"))
+        })
         if models.isEmpty {
-            for entry in (root["model_scoped"] as? [Any] ?? []).compactMap({ $0 as? [String: Any] }) {
-                add(entry["display_name"], window(entry, percent: "utilization"))
-            }
+            models = modelWindows((root["model_scoped"] as? [Any] ?? []).compactMap { $0 as? [String: Any] }.map {
+                ($0["display_name"] as? String, window($0, percent: "utilization"))
+            })
         }
         // A plan without a five-hour limit sends neither `five_hour` nor a `session` entry.
         func legacy(_ key: String, orLimit kind: String) -> LiveUsageWindow? {
