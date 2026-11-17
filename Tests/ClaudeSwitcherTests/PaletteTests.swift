@@ -118,6 +118,23 @@ struct PaletteHeadroomTests {
         #expect(PaletteEngine.headroomOrder(accounts).map(\.id) == ["low", "a", "b", "unknown", "full", "signin"])
     }
 
+    /// With weeks level, an account with no five-hour limit has more room than one whose
+    /// five-hour limit is nearly spent. For Codex a missing figure is unknown, not empty.
+    @Test func noFiveHourLimitIsNotTheWorstFiveHourFigure() {
+        let claude = [
+            PaletteAccount(product: .claude, id: "selected", email: "selected@example.com", isSelected: true, weekUsed: 1),
+            PaletteAccount(product: .claude, id: "max", email: "max@example.com", fiveHourUsed: 97, weekUsed: 30),
+            PaletteAccount(product: .claude, id: "ultra", email: "ultra@example.com", weekUsed: 30),
+        ]
+        #expect(PaletteEngine.headroomOrder(claude).map(\.id) == ["selected", "ultra", "max"])
+        #expect(PaletteEngine.mostHeadroom(in: claude, product: .claude)?.id == "ultra")
+        let codex = [
+            PaletteAccount(product: .codex, id: "unknown@example.com", email: "unknown@example.com", weekUsed: 30),
+            PaletteAccount(product: .codex, id: "known@example.com", email: "known@example.com", fiveHourUsed: 97, weekUsed: 30),
+        ]
+        #expect(PaletteEngine.headroomOrder(codex).map(\.id) == ["known@example.com", "unknown@example.com"])
+    }
+
     /// The week has room, but the model's own week is spent: work on that model stops there.
     @Test func aSpentModelLimitCountsAsNoHeadroom() {
         let accounts = [

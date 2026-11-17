@@ -245,7 +245,10 @@ public enum PaletteEngine {
         else if !hasUsage(account) { tier = 1 }
         else if isAtLimit(account) { tier = 2 }
         else { tier = 0 }
-        return (tier, weekUsed(account) ?? 101, account.fiveHourUsed ?? 101, account.email.lowercased(), account.id)
+        // A Claude account without a five-hour figure has no such limit, or its window has
+        // reset: nothing is used. For Codex a missing figure is unknown, so it ranks last.
+        let fiveHour = account.fiveHourUsed ?? (account.product == .claude ? 0 : 101)
+        return (tier, weekUsed(account) ?? 101, fiveHour, account.email.lowercased(), account.id)
     }
 
     private static func selectedLast(_ accounts: [PaletteAccount]) -> [PaletteAccount] {
