@@ -345,6 +345,8 @@ AUTO_COOLDOWN = 120
 # which can fill while the week for all models still has room. 'all' takes every such
 # limit an account reports, so a renamed or new one cannot go unseen.
 AUTO_MODELS = 'all'
+# The engine's names for the limits that cover every model: the week and the five-hour limit.
+ACCOUNT_WINDOWS = frozenset({'7d', '5h'})
 # Parallel agents can spend a point a minute, and usage is only polled every minute or
 # three, so a fixed 99% is seen after the limit has already stopped them. The exit moves
 # forward by what the recent pace spends in BURN_LEAD; a landing then needs that much room too.
@@ -517,7 +519,7 @@ def leave_at(threshold, samples):
     return max(AUTO_THRESHOLD_RANGE[0], min(threshold, round(100.0 - margin, 1)))
 
 
-def auto_events(threshold, timeout, hold=False):
+def auto_events(threshold, timeout, hold=False, models=AUTO_MODELS):
     """One `auto --once` engine decision as JSON events. The engine paces its own usage
     polls through its usage store, so calling this every minute stays within rate limits.
 
@@ -529,10 +531,11 @@ def auto_events(threshold, timeout, hold=False):
     A target can arrive just under it, so the cooldown between proactive moves is two
     minutes rather than the engine's default five, or the account could run into its hard limit first.
     Usage is the fullest of an account's limits: the week and each model's own week (--model).
+    Without `models` only the week and the five-hour limit count.
     """
     result = subprocess.run([engine(), 'auto', '--once', '--json', '--strategy', 'consume-first',
                              '--cooldown', str(AUTO_COOLDOWN), '--threshold', f'{threshold:g}', '--urgent-only',
-                             '--model', AUTO_MODELS, *(['--hold'] if hold else [])],
+                             *(['--model', models] if models else []), *(['--hold'] if hold else [])],
                             env=clean_environment(), stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout)
     # Exit 0: switched. 2: nothing to do. 3: no viable target. 1: the engine failed.
     if result.returncode not in (0, 2, 3):
@@ -568,6 +571,24 @@ def active_window(events, email):
     used = {name: value for name, value in windows.items()
             if isinstance(name, str) and isinstance(value, (int, float)) and not isinstance(value, bool)}
     return max(used, key=used.get) if used else None
+
+
+def stuck_on_model_limit(events):
+    """True when the engine kept Code on an account whose only spent limit is a model's.
+
+    That happens once no account it could move to has room on that model. Work on other
+    models goes on, and from here only the week can stop it, so the week must decide.
+    """
+    if any(event.get('event') == 'switch' for event in events):
+        return False
+    poll = next((event for event in events if event.get('event') == 'poll'), {})
+    active = poll.get('active') if isinstance(poll.get('active'), dict) else {}
+    windows = (poll.get('windowsPct') or {}).get(str(active.get('number')))
+    if not isinstance(windows, dict):
+        return False
+    spent = {name for name, value in windows.items()
+             if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 100}
+    return bool(spent) and not spent & ACCOUNT_WINDOWS
 
 
 def safe_identity(deadline):
@@ -606,6 +627,11 @@ def auto_tick(threshold, deadline=None, events=None):
             leave = leave_at(threshold, burn)
             try:
                 events = auto_events(leave, deadline.timeout(deadlines.AUTO_ENGINE_TIMEOUT), hold=hold is not None)
+                if stuck_on_model_limit(events):
+                    # With every model limit counted, this account and all it could move to
+                    # read as spent, and the engine would let its week run out too.
+                    events = auto_events(leave, deadline.timeout(deadlines.AUTO_ENGINE_TIMEOUT),
+                                         hold=hold is not None, models=None)
             except (RuntimeError, OSError, subprocess.TimeoutExpired, deadlines.DeadlineExceeded):
                 engine_failed, events = True, []
             note_burn(burn, events)

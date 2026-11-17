@@ -1569,6 +1569,59 @@ class AutoTickTests(unittest.TestCase):
         self.assertEqual(companion.active_window([{"event": "poll", "active": {"number": 2, "email": OLD_EMAIL},
                                                    "windowsPct": {"2": {"7d": None, "Fable": True}}}], OLD_EMAIL), None)
 
+    def test_with_every_model_limit_spent_the_week_decides(self):
+        # Fable is used up here and wherever the engine could move, so it stays; the week
+        # for all models is at 99% and still has to move Code before it stops other work.
+        capped = [{"event": "poll", "active": {"number": 2, "email": OLD_EMAIL}, "headroomPct": {"2": 0.0, "3": 0.0},
+                   "windowsPct": {"2": {"7d": 99.0, "Fable": 100.0}, "3": {"7d": 55.0, "Fable": 100.0}}},
+                  {"event": "no-switch", "reason": "no-qualifying-candidate"}]
+        weekly = [{"event": "poll", "active": {"number": 2, "email": OLD_EMAIL}, "headroomPct": {"2": 1.0, "3": 45.0},
+                   "windowsPct": {"2": {"7d": 99.0}, "3": {"7d": 55.0}}},
+                  {"event": "no-switch", "reason": "cooldown"}]
+        with mock.patch.object(companion, "auto_events", side_effect=[capped, weekly]) as engine, \
+                mock.patch.object(companion, "hold_reason", return_value="manual"), \
+                mock.patch.object(companion.event_log, "emit") as emit:
+            self.code_identity.side_effect = None
+            self.code_identity.return_value = OLD_EMAIL
+            result = companion.auto_tick(99)
+        self.assertEqual([call.kwargs for call in engine.call_args_list],
+                         [{"hold": True}, {"hold": True, "models": None}])
+        self.assertEqual(engine.call_args_list[0].args[0], engine.call_args_list[1].args[0])
+        self.assertEqual(result["reason"], "cooldown")
+        # One decision and one reading for the tick, both from the run that decided.
+        decisions = [call.kwargs for call in emit.call_args_list if call.args[1] == "auto_decision"]
+        self.assertEqual(decisions, [{"reason": "cooldown", "hold": "manual", "used": 99, "window": "7d"}])
+        stored = json.loads((self.base / "burn.json").read_text())
+        self.assertEqual([sample[1:] for sample in stored], [[2, 99.0]])
+
+    def test_the_week_only_decides_when_a_model_limit_is_all_that_is_spent(self):
+        def poll(windows):
+            return [{"event": "poll", "active": {"number": 2, "email": OLD_EMAIL}, "windowsPct": {"2": windows}},
+                    {"event": "no-switch", "reason": "no-qualifying-candidate"}]
+        self.assertTrue(companion.stuck_on_model_limit(poll({"7d": 82.0, "Fable": 100.0})))
+        self.assertTrue(companion.stuck_on_model_limit(poll({"Fable": 100.0, "Opus": 40.0})))
+        # The week or the five-hour limit is spent too: no other model can work there either.
+        self.assertFalse(companion.stuck_on_model_limit(poll({"7d": 100.0, "Fable": 100.0})))
+        self.assertFalse(companion.stuck_on_model_limit(poll({"5h": 100.0, "7d": 20.0, "Fable": 100.0})))
+        # Nothing spent, an unreadable reading, or a move already made.
+        self.assertFalse(companion.stuck_on_model_limit(poll({"7d": 82.0, "Fable": 99.9})))
+        self.assertFalse(companion.stuck_on_model_limit(poll({"7d": None, "Fable": True})))
+        self.assertFalse(companion.stuck_on_model_limit([{"event": "poll", "active": {"number": 2}}]))
+        self.assertFalse(companion.stuck_on_model_limit([]))
+        moved = poll({"7d": 82.0, "Fable": 100.0}) + [{"event": "switch", "trigger": "at-limit"}]
+        self.assertFalse(companion.stuck_on_model_limit(moved))
+
+    def test_the_engine_is_asked_once_when_a_model_limit_has_room_somewhere(self):
+        events = [{"event": "poll", "active": {"number": 2, "email": OLD_EMAIL}, "headroomPct": {"2": 15.0},
+                   "windowsPct": {"2": {"7d": 40.0, "Fable": 85.0}}},
+                  {"event": "no-switch", "reason": "already-consuming-soonest"}]
+        with mock.patch.object(companion, "auto_events", return_value=events) as engine, \
+                mock.patch.object(companion, "hold_reason", return_value=None):
+            self.code_identity.side_effect = None
+            self.code_identity.return_value = OLD_EMAIL
+            companion.auto_tick(99)
+        self.assertEqual(engine.call_count, 1)
+
     def test_a_fast_burn_brings_the_exit_forward_and_a_slow_one_keeps_the_threshold(self):
         # Tonight's run: 92% to 97% in seven minutes on one account.
         fast = [[0, 3, 92.0], [180, 3, 94.0], [300, 3, 95.0], [420, 3, 97.0]]
@@ -1647,6 +1700,10 @@ class AutoTickTests(unittest.TestCase):
         self.assertEqual(run.call_args.args[0], ["/bin/cswap", "auto", "--once", "--json", "--strategy", "consume-first",
                                                  "--cooldown", "120", "--threshold", "95", "--urgent-only",
                                                  "--model", "all"])
+        with mock.patch.object(companion, "configuration", return_value={"engine": "/bin/cswap"}), \
+                mock.patch.object(companion.subprocess, "run", return_value=completed) as run:
+            companion.auto_events(95.0, timeout=30, hold=True, models=None)
+        self.assertEqual(run.call_args.args[0][-2:], ["--urgent-only", "--hold"])
         with mock.patch.object(companion, "configuration", return_value={"engine": "/bin/cswap"}), \
                 mock.patch.object(companion.subprocess, "run", return_value=completed) as run:
             companion.auto_events(95.0, timeout=30, hold=True)
