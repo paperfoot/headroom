@@ -27,9 +27,16 @@ final class UsageBarView: NSView {
     static let mutedTextColor = neutralColor(alpha: 0.75)
 
     // A column is its label, then fixed gauge, number and reset widths; whatever is left
-    // separates the two columns. At the preferred width "~100%" and the widest reset,
-    // "↻ Wed 04:44", fit in both columns. A third and fourth limit go on a second line.
+    // separates the two columns. At the preferred width "5h" and "Week" leave room for
+    // "~100%" and the widest reset, "↻ Wed 04:44", in both columns. A third and fourth limit
+    // go on a second line.
+    //
+    // A model's name is wider than "5h", so beside "Week" its column starts further right.
+    // Nothing is ever drawn cut: a label longer than `maximumLabelWidth` ends in an ellipsis,
+    // which keeps the percentage whole for any pair of names, and a reset time that does not
+    // fit is left to the tooltip.
     private static let columns = 2
+    private static let maximumLabelWidth: CGFloat = 48
     private static let rightInset: CGFloat = 12
     private static let rowHeight: CGFloat = 22
     private static let minimumColumnGap: CGFloat = 14
@@ -79,14 +86,15 @@ final class UsageBarView: NSView {
         let label: [NSAttributedString.Key: Any] = [.font: labelFont, .foregroundColor: Self.mutedTextColor]
         let note: [NSAttributedString.Key: Any] = [.font: noteFont, .foregroundColor: Self.mutedTextColor]
 
-        let labelWidth = { (row: Row) in ceil((row.label as NSString).size(withAttributes: label).width) + Self.labelGap }
+        let labels = rows.map { Self.fitted($0.label, width: Self.maximumLabelWidth, attributes: label) }
+        let widths = labels.map { ceil(($0 as NSString).size(withAttributes: label).width) + Self.labelGap }
         let fixedWidth = Self.barWidth + Self.barGap + Self.percentWidth + Self.trailingWidth
         let available = bounds.width - Self.titleInset - Self.rightInset
         // Gauges line up from line to line when the widest label of each column leaves room;
         // otherwise each line is laid out by itself, so a long label below cannot clip the line above.
         var aligned = [CGFloat](repeating: 0, count: min(Self.columns, rows.count))
-        for (index, row) in rows.enumerated() {
-            aligned[index % Self.columns] = max(aligned[index % Self.columns], labelWidth(row))
+        for index in rows.indices {
+            aligned[index % Self.columns] = max(aligned[index % Self.columns], widths[index])
         }
         let alignedFits = aligned.reduce(0, +) + CGFloat(aligned.count) * fixedWidth
             + CGFloat(max(0, aligned.count - 1)) * Self.minimumColumnGap <= available
@@ -95,7 +103,7 @@ final class UsageBarView: NSView {
             let bottom = bounds.height - CGFloat(first / Self.columns + 1) * Self.rowHeight
             guard bottom >= 0 else { break }
             let line = rows[first..<min(first + Self.columns, rows.count)]
-            let labelWidths = alignedFits ? aligned : line.map(labelWidth)
+            let labelWidths = alignedFits ? aligned : Array(widths[line.indices])
             let used = labelWidths.reduce(0, +) + CGFloat(labelWidths.count) * fixedWidth
             let gap = max(Self.minimumColumnGap, available - used)
             var start = Self.titleInset
@@ -106,7 +114,8 @@ final class UsageBarView: NSView {
                     bar.draw(at: NSPoint(x: x, y: bottom + Self.baseline + labelFont.descender), withAttributes: label)
                 }
                 var x = start
-                (row.label as NSString).draw(at: NSPoint(x: x, y: bottom + Self.baseline + labelFont.descender), withAttributes: label)
+                (labels[first + column] as NSString).draw(at: NSPoint(x: x, y: bottom + Self.baseline + labelFont.descender),
+                                                          withAttributes: label)
                 x += labelWidths[column]
 
                 let color = Self.color(for: row.level)
@@ -123,19 +132,28 @@ final class UsageBarView: NSView {
                 x += Self.percentWidth
 
                 if let trailing = row.trailing {
-                    // The last column may use the slack; a narrower view clips instead of overlapping.
+                    // The last column may use the slack. Half a reset time reads as another
+                    // time, so one that does not fit is not drawn; the tooltip has it.
                     let end = column == labelWidths.count - 1 ? bounds.width - Self.rightInset : x + Self.trailingWidth
-                    let available = end - x
-                    if available > 20 {
-                        NSGraphicsContext.saveGraphicsState()
-                        NSBezierPath(rect: NSRect(x: x, y: bottom, width: available, height: Self.rowHeight)).addClip()
+                    if ceil((trailing as NSString).size(withAttributes: note).width) <= end - x {
                         (trailing as NSString).draw(at: NSPoint(x: x, y: bottom + Self.baseline + noteFont.descender), withAttributes: note)
-                        NSGraphicsContext.restoreGraphicsState()
                     }
                 }
                 start += labelWidths[column] + fixedWidth + gap
             }
         }
+    }
+
+    /// `text`, or as much of it as fits in `width` followed by an ellipsis.
+    static func fitted(_ text: String, width: CGFloat, attributes: [NSAttributedString.Key: Any]) -> String {
+        guard (text as NSString).size(withAttributes: attributes).width > width else { return text }
+        var kept = Substring(text)
+        while !kept.isEmpty {
+            kept = kept.dropLast()
+            let candidate = kept.trimmingCharacters(in: .whitespaces) + "\u{2026}"
+            if (candidate as NSString).size(withAttributes: attributes).width <= width { return candidate }
+        }
+        return "\u{2026}"
     }
 
     /// One anatomy for every known value: a track tinted with the level colour, a thin

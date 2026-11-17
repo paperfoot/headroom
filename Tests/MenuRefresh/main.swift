@@ -182,6 +182,15 @@ private final class MenuRefreshHarness {
         check(detailText(in: warned, id: "claude.auto-switch") == input.autoSwitchWarning, "an open menu follows the latest tick")
         input.autoSwitchWarning = nil
 
+        // A long model name ends in an ellipsis instead of pushing the percentage off the edge.
+        let labelFont: [NSAttributedString.Key: Any] = [.font: NSFont.menuFont(ofSize: 11)]
+        let long = UsageBarView.fitted("Fable 5.2 (1M context)", width: 48, attributes: labelFont)
+        check(long.hasSuffix("\u{2026}") && long.hasPrefix("Fable") && (long as NSString).size(withAttributes: labelFont).width <= 48,
+              "a long gauge label is shortened to fit")
+        check(["5h", "Week", "Fable", "Opus", "Sonnet", "Haiku"].allSatisfy {
+            UsageBarView.fitted($0, width: 48, attributes: labelFont) == $0
+        }, "today's gauge labels are drawn whole")
+
         // A menu on screen keeps its frame when a reading adds a limit.
         let height = weekly?.frame.height
         input.liveUsage["alpha"] = input.liveUsage["beta"].map {
