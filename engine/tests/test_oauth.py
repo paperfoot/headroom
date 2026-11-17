@@ -417,6 +417,169 @@ class TestFetchUsage:
         assert "scoped" not in result
 
 
+class TestUsagePayloadDrift:
+    """build_usage_result against payload shapes Anthropic has sent or could send.
+
+    The two outcomes to rule out: raising (the whole fetch fails, and the
+    engine decides on an old reading for up to an hour) and quietly dropping a
+    window (the account reads as roomier than it is).
+    """
+
+    RESET = "2026-11-20T07:00:00.120426+00:00"
+
+    def payload(self, **changes):
+        """The November 2026 payload of a plan with no five-hour limit."""
+        data = {
+            "five_hour": None,
+            "seven_day": {"utilization": 82, "resets_at": self.RESET, "limit_dollars": None},
+            "seven_day_opus": None,
+            "extra_usage": {"is_enabled": False, "monthly_limit": None, "used_credits": 0,
+                            "utilization": None, "currency": "GBP"},
+            "limits": [
+                {"kind": "weekly_all", "group": "weekly", "percent": 82, "severity": "normal",
+                 "resets_at": self.RESET, "scope": None, "is_active": True},
+                {"kind": "weekly_scoped", "group": "weekly", "percent": 100, "severity": "normal",
+                 "resets_at": self.RESET,
+                 "scope": {"model": {"id": None, "display_name": "Fable"}, "surface": None},
+                 "is_active": False},
+            ],
+            "weekly_scoped_shares": [
+                {"limit_index": 1, "used_percent_of_weekly": 41, "allowance_percent_of_weekly": 50}],
+            "model_scoped": [{"display_name": "Fable", "utilization": 100, "resets_at": self.RESET}],
+        }
+        data.update(changes)
+        return data
+
+    def fable(self, **changes):
+        limit = {"kind": "weekly_scoped", "percent": 100, "resets_at": self.RESET,
+                 "scope": {"model": {"id": None, "display_name": "Fable"}, "surface": None}}
+        limit.update(changes)
+        return limit
+
+    def headrooms(self, data):
+        result = oauth.build_usage_result(data)
+        return oauth.account_headroom(result), oauth.account_headroom(result, ["all"])
+
+    def test_todays_payload(self):
+        result = oauth.build_usage_result(self.payload())
+        assert "five_hour" not in result
+        assert result["seven_day"]["pct"] == 82
+        assert result["seven_day"]["resets_at"] == self.RESET
+        assert [(s["name"], s["pct"]) for s in result["scoped"]] == [("Fable", 100.0)]
+        assert self.headrooms(self.payload()) == (18.0, 0.0)
+
+    @pytest.mark.parametrize("five_hour", [
+        "n/a", 7, ["x"], {}, {"resets_at": "2026-11-20T07:00:00+00:00"},
+        {"utilization": None}, {"utilization": True}, {"utilization": "soon"},
+        {"utilization": float("nan")},
+    ])
+    def test_an_unusable_five_hour_window_costs_only_itself(self, five_hour):
+        result = oauth.build_usage_result(self.payload(five_hour=five_hour))
+        assert "five_hour" not in result
+        assert self.headrooms(self.payload(five_hour=five_hour)) == (18.0, 0.0)
+
+    @pytest.mark.parametrize("resets_at", [
+        "2026-11-20T07:00:00", 1795158000, "Fri, 20 Nov 2026 07:00:00 GMT", "soon", ["x"],
+    ])
+    def test_an_unreadable_reset_keeps_the_percentage(self, resets_at):
+        data = self.payload(
+            five_hour={"utilization": 12, "resets_at": resets_at},
+            seven_day={"utilization": 82, "resets_at": resets_at},
+            limits=[self.fable(resets_at=resets_at)],
+        )
+        result = oauth.build_usage_result(data)
+        assert result["five_hour"] == {"pct": 12}
+        assert result["seven_day"] == {"pct": 82}
+        assert result["scoped"] == [{"name": "Fable", "pct": 100.0}]
+        assert self.headrooms(data) == (18.0, 0.0)
+
+    def test_a_zulu_reset_is_read(self):
+        result = oauth.build_usage_result(self.payload(
+            seven_day={"utilization": 82, "resets_at": "2026-11-20T07:00:00Z"}))
+        assert result["seven_day"]["resets_at"] == "2026-11-20T07:00:00Z"
+        assert "clock" in result["seven_day"]
+
+    @pytest.mark.parametrize("seven_day", [None, "n/a", {}, {"utilization": None},
+                                           {"utilization": "soon"}])
+    def test_the_week_is_read_from_limits_when_the_legacy_key_is_unusable(self, seven_day):
+        result = oauth.build_usage_result(self.payload(seven_day=seven_day))
+        assert result["seven_day"]["pct"] == 82
+        assert result["seven_day"]["resets_at"] == self.RESET
+
+    def test_a_week_near_its_limit_is_not_hidden_behind_a_roomy_model(self):
+        data = self.payload(seven_day=None, limits=[
+            {"kind": "weekly_all", "percent": 99.5, "resets_at": self.RESET, "scope": None},
+            self.fable(percent=60),
+        ])
+        assert self.headrooms(data) == (0.5, 0.5)
+
+    def test_the_legacy_week_wins_while_it_is_usable(self):
+        data = self.payload(seven_day={"utilization": 20, "resets_at": None})
+        assert oauth.build_usage_result(data)["seven_day"] == {"pct": 20}
+
+    def test_numeric_strings_are_read(self):
+        data = self.payload(seven_day={"utilization": "82", "resets_at": None},
+                            limits=[self.fable(percent="100")])
+        assert self.headrooms(data) == (18.0, 0.0)
+
+    def test_the_five_hour_window_is_read_from_limits_too(self):
+        data = self.payload(limits=[
+            {"kind": "session", "group": "session", "percent": 64, "resets_at": self.RESET,
+             "scope": None},
+            self.fable(percent=10),
+        ])
+        result = oauth.build_usage_result(data)
+        assert result["five_hour"]["pct"] == 64
+        assert oauth.account_headroom(result) == 18.0  # the week still binds
+
+    @pytest.mark.parametrize("limits", [
+        None, "n/a", [], ["noise", 7],
+        [{"kind": "weekly_scoped", "percent": None,
+          "scope": {"model": {"display_name": "Fable"}}}],
+        [{"kind": "weekly_scoped", "percent": "soon",
+          "scope": {"model": {"display_name": "Fable"}}}],
+        [{"kind": "weekly_scoped", "percent": 100, "scope": {"model": {"display_name": None}}}],
+        [{"kind": "weekly_scoped", "percent": 100, "scope": {"model": None, "surface": "cowork"}}],
+    ])
+    def test_a_model_limit_missing_from_limits_is_read_from_model_scoped(self, limits):
+        data = self.payload(limits=limits)
+        result = oauth.build_usage_result(data)
+        assert [(s["name"], s["pct"]) for s in result["scoped"]] == [("Fable", 100.0)]
+        assert oauth.account_headroom(result, ["all"]) == 0.0
+
+    def test_a_model_known_only_by_its_id_still_binds(self):
+        data = self.payload(model_scoped=None, limits=[
+            self.fable(scope={"model": {"id": "claude-fable-5-2", "display_name": None}})])
+        result = oauth.build_usage_result(data)
+        assert [s["name"] for s in result["scoped"]] == ["claude-fable-5-2"]
+        assert oauth.account_headroom(result, ["all"]) == 0.0
+
+    def test_model_scoped_is_not_read_twice(self):
+        result = oauth.build_usage_result(self.payload())
+        assert len(result["scoped"]) == 1
+
+    @pytest.mark.parametrize("model_scoped", [None, "n/a", [7], [{"display_name": "", "utilization": 5}],
+                                              [{"display_name": "Fable", "utilization": None}]])
+    def test_an_unusable_model_scoped_list_is_ignored(self, model_scoped):
+        data = self.payload(limits=None, model_scoped=model_scoped)
+        result = oauth.build_usage_result(data)
+        assert "scoped" not in result
+        assert result["seven_day"]["pct"] == 82
+
+    def test_a_payload_with_no_window_is_unknown(self):
+        assert oauth.build_usage_result({"five_hour": None, "seven_day": None}) is None
+        assert oauth.build_usage_result({}) is None
+
+    def test_a_broken_extra_usage_block_costs_only_the_spend_line(self):
+        for extra in ("n/a", {"is_enabled": True, "used_credits": "x", "monthly_limit": 5,
+                              "utilization": 1},
+                      {"is_enabled": True, "used_credits": 100, "monthly_limit": 500,
+                       "utilization": 20, "resets_at": "soon"}):
+            result = oauth.build_usage_result(self.payload(extra_usage=extra))
+            assert "spend" not in result
+            assert result["seven_day"]["pct"] == 82
+
+
 class TestRefreshOAuthCredentials:
     """Test direct OAuth refresh requests."""
 

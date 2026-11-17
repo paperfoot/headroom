@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Sequence
@@ -428,30 +429,85 @@ def _log_usage_failure(
 
 
 
+def _percent(value: object) -> float | int | None:
+    """A utilization as the API sent it (82 or 82.0), a numeric string as a
+    float, and anything else -- a boolean, NaN, a missing value -- unknown."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        try:
+            value = float(value)
+        except ValueError:
+            return None
+    if isinstance(value, (int, float)) and math.isfinite(value):
+        return value
+    return None
+
+
+def _usage_window(pct: object, resets_at: object) -> dict | None:
+    """One usage window, or None when it carries no usable percentage.
+
+    A reset time that cannot be read is dropped rather than allowed to void
+    the window: the percentage is what gates the account.
+    """
+    pct = _percent(pct)
+    if pct is None:
+        return None
+    entry: dict = {"pct": pct}
+    if resets_at:
+        try:
+            countdown, clock = format_reset(resets_at)
+        except (TypeError, ValueError):
+            _logger.warning(
+                "Usage reset time not understood: %.40r", resets_at
+            )
+        else:
+            entry["resets_at"] = resets_at
+            entry["countdown"], entry["clock"] = countdown, clock
+    return entry
+
+
 def build_usage_result(data: dict) -> dict | None:
-    """Normalize raw usage API data into the structure used by the CLI."""
+    """Normalize raw usage API data into the structure used by the CLI.
+
+    Each window is read on its own. The payload has changed shape before
+    (``five_hour`` went null, per-model limits arrived in ``limits``), and a
+    window this function cannot read must cost only itself: raising here
+    fails the whole fetch, and skipping a window quietly reads the account as
+    roomier than it is. So a window is also looked for in the other place the
+    payload carries it.
+    """
     _logger.debug("Usage API response: %s", json.dumps(data, indent=2))
 
     result = {}
+    raw_limits = data.get("limits")
+    limits = (
+        [lim for lim in raw_limits if isinstance(lim, dict)]
+        if isinstance(raw_limits, list)
+        else []
+    )
 
-    h5 = data.get("five_hour")
-    if h5:
-        h5_entry = {"pct": h5["utilization"]}
-        if h5.get("resets_at"):
-            h5_entry["resets_at"] = h5["resets_at"]
-            h5_entry["countdown"], h5_entry["clock"] = format_reset(h5["resets_at"])
-        result["five_hour"] = h5_entry
-
-    d7 = data.get("seven_day")
-    if d7:
-        d7_entry = {"pct": d7["utilization"]}
-        if d7.get("resets_at"):
-            d7_entry["resets_at"] = d7["resets_at"]
-            d7_entry["countdown"], d7_entry["clock"] = format_reset(d7["resets_at"])
-        result["seven_day"] = d7_entry
+    # The legacy keys, then the same window in ``limits`` when the legacy key
+    # is gone or unusable: ``session`` is the five-hour window there and
+    # ``weekly_all`` the week for all models. An account without a five-hour
+    # limit has neither ``five_hour`` nor a ``session`` entry.
+    for key, kind in (("five_hour", "session"), ("seven_day", "weekly_all")):
+        raw = data.get(key)
+        entry = (
+            _usage_window(raw.get("utilization"), raw.get("resets_at"))
+            if isinstance(raw, dict)
+            else None
+        )
+        if entry is None:
+            for lim in limits:
+                if lim.get("kind") == kind:
+                    entry = _usage_window(lim.get("percent"), lim.get("resets_at"))
+                    break
+        if entry is not None:
+            result[key] = entry
 
     eu = data.get("extra_usage")
-    if eu and eu.get("is_enabled"):
+    if isinstance(eu, dict) and eu.get("is_enabled"):
         # Claude Code returns nullable used_credits, monthly_limit, and utilization
         # (monthly_limit=None = unlimited). All three are needed to render the spend
         # line, so when any is null skip just the spend entry; five_hour/seven_day
@@ -474,32 +530,44 @@ def build_usage_result(data: dict) -> dict | None:
             except (TypeError, ValueError) as e:
                 _logger.debug("extra_usage parse failed: %r", e)
 
-    # Per-model weekly limits live in the newer ``limits`` array as
-    # ``weekly_scoped`` entries carrying a ``scope.model.display_name`` (e.g.
-    # "Fable"). The legacy five_hour/seven_day keys above never expose these, so
-    # surface each scoped window separately. Absent/older responses (no
-    # ``limits``) simply yield no ``scoped`` key.
-    limits = data.get("limits")
-    if isinstance(limits, list):
-        scoped: list[dict] = []
-        for lim in limits:
-            if not isinstance(lim, dict):
-                continue
-            scope = lim.get("scope")
-            model = scope.get("model") if isinstance(scope, dict) else None
-            name = model.get("display_name") if isinstance(model, dict) else None
-            pct = lim.get("percent")
-            if not name or not isinstance(pct, (int, float)):
-                continue
-            scoped_entry: dict = {"name": name, "pct": float(pct)}
-            if lim.get("resets_at"):
-                scoped_entry["resets_at"] = lim["resets_at"]
-                scoped_entry["countdown"], scoped_entry["clock"] = format_reset(lim["resets_at"])
-            scoped.append(scoped_entry)
-        if scoped:
-            result["scoped"] = scoped
+    # Per-model weekly limits are ``limits`` entries whose scope names a model
+    # (e.g. "Fable"); the legacy five_hour/seven_day keys never expose these.
+    # ``model_scoped`` repeats them and is read when ``limits`` names none.
+    scoped: list[dict] = []
+    for lim in limits:
+        scope = lim.get("scope")
+        model = scope.get("model") if isinstance(scope, dict) else None
+        if not isinstance(model, dict):
+            continue
+        _add_scoped(
+            scoped,
+            model.get("display_name") or model.get("id"),
+            lim.get("percent"),
+            lim.get("resets_at"),
+        )
+    if not scoped:
+        raw_models = data.get("model_scoped")
+        for item in raw_models if isinstance(raw_models, list) else []:
+            if isinstance(item, dict):
+                _add_scoped(
+                    scoped,
+                    item.get("display_name"),
+                    item.get("utilization"),
+                    item.get("resets_at"),
+                )
+    if scoped:
+        result["scoped"] = scoped
 
     return result if result else None
+
+
+def _add_scoped(scoped: list[dict], name: object, pct: object, resets_at: object) -> None:
+    """Append one per-model weekly window when it has a name and a percentage."""
+    if not isinstance(name, str) or not name.strip():
+        return
+    entry = _usage_window(pct, resets_at)
+    if entry is not None:
+        scoped.append({"name": name.strip(), **entry, "pct": float(entry["pct"])})
 
 
 def relevant_windows(
