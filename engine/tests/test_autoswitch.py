@@ -4516,12 +4516,14 @@ class TestHorizonAxisDoesNotFlap:
         at-limit case pass either way, which is what hid this.
         """
         state = {"lastSwitchFrom": 1}
-        # 15 pts against an active on 10: does NOT clear `left >= active x 2`,
+        # 8 pts against an active on 5: does NOT clear `left >= active x 2`,
         # so the ratio release cannot fire and only the trigger check can
-        # answer. A peer far ahead would pass for the wrong reason.
-        headroom = {"1": 15.0, "2": 10.0, "3": 1.0}
+        # answer. A peer far ahead would pass for the wrong reason. Both are
+        # over the 90% line: a left account under it is never barred on a
+        # threshold exit (see TestWeekAndModelLimitFleet).
+        headroom = {"1": 8.0, "2": 5.0, "3": 1.0}
         for trigger in ("at-limit", "failover"):
-            for active in (10.0, None):
+            for active in (5.0, None):
                 assert harness.engine._no_return_account(
                     trigger, state, headroom, active, ["1", "3"], harness.settings
                 ) is None, (
@@ -4530,7 +4532,7 @@ class TestHorizonAxisDoesNotFlap:
                 )
         # The control: the SAME state bars on a proactive tick.
         assert harness.engine._no_return_account(
-            "proactive", state, headroom, 10.0, ["1", "3"], harness.settings
+            "proactive", state, headroom, 5.0, ["1", "3"], harness.settings
         ) == "1", "premise: these inputs are barred when the trigger allows it"
 
     @pytest.mark.parametrize(

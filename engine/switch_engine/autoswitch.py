@@ -1530,6 +1530,21 @@ class AutoSwitchEngine:
         # account that is not in it bars nothing. The check was a no-op and
         # nothing killed it under mutation.
         barred = str(came_from)
+        left_now = headroom.get(barred)
+        if (
+            trigger == "proactive"
+            and settings is not None
+            and left_now is not None
+            and (100.0 - left_now) < settings.threshold
+        ):
+            # Leaving at the threshold for an account under it cannot be
+            # undone by the next tick: the account being left is over the line,
+            # and the landing rule keeps every account over the line out of
+            # the ranking. The bar is for the walk where every account is over
+            # it. Holding it here stranded a two-account fleet: consume-first
+            # moved A -> B, B reached the line with only A under it, and the
+            # engine sat BLOCKED until B hit its limit and escaped at 100%.
+            return None
         if not recovered:
             return barred        # the ratio below burns true on its own; see above
         left_headroom = headroom.get(barred)
