@@ -1704,7 +1704,7 @@ class AutoTickTests(unittest.TestCase):
             events = companion.auto_events(95.0, timeout=30)
         self.assertEqual([event["event"] for event in events], ["poll", "no-switch"])
         self.assertEqual(run.call_args.args[0], ["/bin/cswap", "auto", "--once", "--json", "--strategy", "consume-first",
-                                                 "--cooldown", "120", "--threshold", "95", "--urgent-only",
+                                                 "--cooldown", "90", "--threshold", "95", "--urgent-only",
                                                  "--model", "all"])
         with mock.patch.object(companion, "configuration", return_value={"engine": "/bin/cswap"}), \
                 mock.patch.object(companion.subprocess, "run", return_value=completed) as run:

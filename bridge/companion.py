@@ -340,7 +340,10 @@ def extension_follow(email):
 
 
 AUTO_THRESHOLD_RANGE = (50.0, 99.9)
-AUTO_COOLDOWN = 120
+# Two ticks between optional or threshold moves. The app ticks every 60 s give or take ten,
+# and a switch is stamped a few seconds into its tick, so 120 s was still running at the
+# second tick and the exit came on the third: three minutes on an account at 99%.
+AUTO_COOLDOWN = 90
 # An account also counts as spent when a weekly limit for one model is, such as Fable's,
 # which can fill while the week for all models still has room. 'all' takes every such
 # limit an account reports, so a renamed or new one cannot go unseen.
@@ -532,7 +535,7 @@ def auto_events(threshold, timeout, hold=False, models=AUTO_MODELS):
     and --hold skips optional moves altogether (see hold_reason).
     Room means usage under `threshold`, which is why the app's default sits near the limit.
     A target can arrive just under it, so the cooldown between proactive moves is two
-    minutes rather than the engine's default five, or the account could run into its hard limit first.
+    ticks rather than the engine's default five minutes, or the account could run into its hard limit first.
     Usage is the fullest of an account's limits: the week and each model's own week (--model).
     Without `models` only the week and the five-hour limit count.
     """
