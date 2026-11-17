@@ -73,8 +73,21 @@ struct PaletteEmptyQueryTests {
         let list = rows("", limit: 20)
         #expect(list.first { $0.id == "switchClaude:team199" }?.subtitle == "5h 5% \u{00B7} Week 10%")
         #expect(list.first { $0.id == "switchClaude:work" }?.subtitle == "5h 40% \u{00B7} Week 30% \u{00B7} selected")
-        #expect(list.first { $0.id == "switchClaude:idle" }?.subtitle == "5h \u{2014} \u{00B7} Week \u{2014}")
+        #expect(list.first { $0.id == "switchClaude:idle" }?.subtitle == "Week \u{2014}")
         #expect(list.first { $0.id == "switchClaude:lab-alpha" }?.subtitle == "sign in needed")
+    }
+
+    @Test func subtitlesShowEachModelLimitAndFiveHoursOnlyWhereAnAccountHasThem() {
+        // A plan without a five-hour limit: the week, then the model's own week.
+        let ultra = PaletteAccount(product: .claude, id: "ultra", email: "ultra@example.com", weekUsed: 82,
+                                   models: [.init(name: "Fable", used: 100)])
+        #expect(PaletteRows.accountSubtitle(ultra) == "Week 82% \u{00B7} Fable 100%")
+        let max = PaletteAccount(product: .claude, id: "max", email: "max@example.com", fiveHourUsed: 5, weekUsed: 10,
+                                 models: [.init(name: "Fable", used: 20)])
+        #expect(PaletteRows.accountSubtitle(max) == "5h 5% \u{00B7} Week 10% \u{00B7} Fable 20%")
+        // Codex always has a five-hour limit, so an unknown one still shows.
+        let codex = PaletteAccount(product: .codex, id: "codex@example.com", email: "codex@example.com")
+        #expect(PaletteRows.accountSubtitle(codex) == "5h \u{2014} \u{00B7} Week \u{2014}")
     }
 
     @Test func idsAreStable() {
@@ -103,6 +116,27 @@ struct PaletteHeadroomTests {
             PaletteAccount(product: .claude, id: "low", email: "low@example.com", fiveHourUsed: 90, weekUsed: 1),
         ]
         #expect(PaletteEngine.headroomOrder(accounts).map(\.id) == ["low", "a", "b", "unknown", "full", "signin"])
+    }
+
+    /// The week has room, but the model's own week is spent: work on that model stops there.
+    @Test func aSpentModelLimitCountsAsNoHeadroom() {
+        let accounts = [
+            PaletteAccount(product: .claude, id: "selected", email: "selected@example.com", isSelected: true, weekUsed: 2),
+            PaletteAccount(product: .claude, id: "fable-spent", email: "fable-spent@example.com", weekUsed: 82,
+                           models: [.init(name: "Fable", used: 100)]),
+            PaletteAccount(product: .claude, id: "fable-high", email: "fable-high@example.com", weekUsed: 35,
+                           models: [.init(name: "Fable", used: 90)]),
+            PaletteAccount(product: .claude, id: "roomy", email: "roomy@example.com", weekUsed: 60,
+                           models: [.init(name: "Fable", used: 30)]),
+            PaletteAccount(product: .claude, id: "model-only", email: "model-only@example.com",
+                           models: [.init(name: "Fable", used: 70)]),
+        ]
+        #expect(PaletteEngine.isAtLimit(accounts[1]))
+        #expect(!PaletteEngine.isAtLimit(accounts[2]))
+        #expect(PaletteEngine.weekUsed(accounts[2]) == 90)
+        #expect(PaletteEngine.hasUsage(accounts[4]))
+        #expect(PaletteEngine.headroomOrder(accounts).map(\.id) == ["selected", "roomy", "model-only", "fable-high", "fable-spent"])
+        #expect(PaletteEngine.mostHeadroom(in: accounts, product: .claude)?.id == "roomy")
     }
 
     @Test func mostHeadroomSkipsSelectedSignInAndExhaustedAccounts() {

@@ -14,12 +14,26 @@ public struct PaletteAccount: Sendable, Equatable {
     public let isSelected: Bool
     /// Signed out, never connected, or its saved login expired.
     public let needsSignIn: Bool
-    /// Percentage of the five-hour and weekly limits used, when known.
+    /// Percentage of the five-hour and weekly limits used, when known. A Claude account
+    /// without a five-hour limit has no `fiveHourUsed`.
     public let fiveHourUsed: Int?
     public let weekUsed: Int?
+    /// Percentage used of each model's own weekly limit, such as Fable's.
+    public let models: [ModelUsage]
+
+    public struct ModelUsage: Sendable, Equatable {
+        public let name: String
+        public let used: Int
+
+        public init(name: String, used: Int) {
+            self.name = name
+            self.used = used
+        }
+    }
 
     public init(product: Product, id: String, email: String, isSelected: Bool = false,
-                needsSignIn: Bool = false, fiveHourUsed: Int? = nil, weekUsed: Int? = nil) {
+                needsSignIn: Bool = false, fiveHourUsed: Int? = nil, weekUsed: Int? = nil,
+                models: [ModelUsage] = []) {
         self.product = product
         self.id = id
         self.email = email
@@ -27,6 +41,7 @@ public struct PaletteAccount: Sendable, Equatable {
         self.needsSignIn = needsSignIn
         self.fiveHourUsed = fiveHourUsed
         self.weekUsed = weekUsed
+        self.models = models
     }
 }
 
@@ -189,7 +204,8 @@ public enum PaletteEngine {
         return rows
     }
 
-    /// Most headroom first: the lowest weekly use, then the lowest five-hour use. Accounts with
+    /// Most headroom first: the lowest weekly use, then the lowest five-hour use. Weekly use is
+    /// the fullest of the week for all models and each model's own week. Accounts with
     /// unknown usage follow, then accounts at their limit (`limitPercent`), then accounts that
     /// need to sign in again. Ties fall back to the email, so the order is stable.
     public static func headroomOrder(_ accounts: [PaletteAccount]) -> [PaletteAccount] {
@@ -204,12 +220,23 @@ public enum PaletteEngine {
         }).first
     }
 
+    /// The fullest weekly limit: the week for all models, or one model's own week when that
+    /// is fuller. A model's limit at 100% stops that model's work whatever the week says.
+    static func weekUsed(_ account: PaletteAccount) -> Int? {
+        ([account.weekUsed].compactMap { $0 } + account.models.map(\.used)).max()
+    }
+
+    /// The fullest of all the account's limits, when any is known.
+    static func used(_ account: PaletteAccount) -> Int? {
+        [weekUsed(account), account.fiveHourUsed].compactMap { $0 }.max()
+    }
+
     static func isAtLimit(_ account: PaletteAccount) -> Bool {
-        (account.weekUsed ?? 0) >= limitPercent || (account.fiveHourUsed ?? 0) >= limitPercent
+        (used(account) ?? 0) >= limitPercent
     }
 
     static func hasUsage(_ account: PaletteAccount) -> Bool {
-        account.weekUsed != nil || account.fiveHourUsed != nil
+        used(account) != nil
     }
 
     private static func headroomKey(_ account: PaletteAccount) -> (Int, Int, Int, String, String) {
@@ -218,7 +245,7 @@ public enum PaletteEngine {
         else if !hasUsage(account) { tier = 1 }
         else if isAtLimit(account) { tier = 2 }
         else { tier = 0 }
-        return (tier, account.weekUsed ?? 101, account.fiveHourUsed ?? 101, account.email.lowercased(), account.id)
+        return (tier, weekUsed(account) ?? 101, account.fiveHourUsed ?? 101, account.email.lowercased(), account.id)
     }
 
     private static func selectedLast(_ accounts: [PaletteAccount]) -> [PaletteAccount] {
@@ -994,7 +1021,7 @@ enum PaletteCatalog {
                                                 "stop": true, "resume": false, "unpause": false, "unblock": false])
         case .autoSwitch:
             return PaletteEntry(action: .toggle(toggle), name: "Auto-switch at limit",
-                                subtitle: "Use quota before it resets; never moves off your pick for an hour, or while agents use the browser",
+                                subtitle: "Moves before a limit; until then stays on your pick, and while agents use the browser",
                                 symbol: "arrow.triangle.swap",
                                 keywords: keywords(["auto": 1, "automatic": 1, "automatically": 0.9,
                                                     "autoswitch": 1, "auto-switch": 1, "limit": 1, "limits": 0.9,
@@ -1157,13 +1184,17 @@ enum PaletteRows {
         account.email.isEmpty ? account.id : account.email
     }
 
-    /// "5h 28% · Week 26% · selected". Unknown values show as an em dash.
+    /// "Week 26% · Fable 40% · selected", with "5h 28%" first for an account that has a
+    /// five-hour limit. Unknown values show as an em dash.
     static func accountSubtitle(_ account: PaletteAccount, note: String? = nil) -> String? {
         var parts: [String] = []
         if PaletteEngine.hasUsage(account) || !account.needsSignIn {
-            let five = account.fiveHourUsed.map { "\($0)%" } ?? "\u{2014}"
-            let week = account.weekUsed.map { "\($0)%" } ?? "\u{2014}"
-            parts.append("5h \(five) \u{00B7} Week \(week)")
+            // Codex always has a five-hour limit; Claude has one only on some plans.
+            if account.product == .codex || account.fiveHourUsed != nil {
+                parts.append("5h " + (account.fiveHourUsed.map { "\($0)%" } ?? "\u{2014}"))
+            }
+            parts.append("Week " + (account.weekUsed.map { "\($0)%" } ?? "\u{2014}"))
+            parts += account.models.map { "\($0.name) \($0.used)%" }
         }
         if account.isSelected { parts.append("selected") }
         if account.needsSignIn { parts.append("sign in needed") }

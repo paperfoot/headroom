@@ -165,7 +165,7 @@ public struct JevRouter: Sendable {
     /// "plenty", "some", "little", "none" or "unknown": how much of its limits an account has left.
     static func headroom(_ account: PaletteAccount) -> String {
         guard PaletteEngine.hasUsage(account) else { return "unknown" }
-        let used = max(account.weekUsed ?? 0, account.fiveHourUsed ?? 0)
+        let used = PaletteEngine.used(account) ?? 0
         if used >= PaletteEngine.limitPercent { return "none" }
         if used >= 80 { return "little" }
         if used >= 50 { return "some" }

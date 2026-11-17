@@ -30,7 +30,8 @@ private final class MenuRefreshHarness {
         // Readings ten and fifteen minutes old are current: accounts refresh at different moments.
         expectRows(in: menu, id: "claude-switcher.live-usage.alpha", [0, 9], stale: false)
         expectRows(in: menu, id: "claude-switcher.live-usage.beta", [99, 100], stale: true)
-        expectRows(in: menu, id: "claude-switcher.live-usage.gamma", [nil, nil], stale: false)
+        // No reading yet: only the week is certain to exist for a Claude account.
+        expectRows(in: menu, id: "claude-switcher.live-usage.gamma", [nil], stale: false)
         expectRows(in: menu, id: "codex.usage.delta@example.test", [9, 99], stale: false)
         expectRows(in: menu, id: "codex.usage.echo@example.test", [100, 0], stale: true)
         check(item(in: menu, id: "codex.usage.foxtrot@example.test") == nil,
@@ -58,7 +59,7 @@ private final class MenuRefreshHarness {
         expectRows(in: menu, id: "claude-switcher.live-usage.alpha", [nil, 99], stale: false)
         check(usageView(in: menu, id: "claude-switcher.live-usage.alpha")?.rows.map(\.trailing) == ["↻ due", "↻ Tue 00:05"],
               "a passed reset shows as due instead of the previous window's value")
-        expectRows(in: menu, id: "claude-switcher.live-usage.beta", [nil, nil], stale: false)
+        expectRows(in: menu, id: "claude-switcher.live-usage.beta", [nil], stale: false)
         check(usageView(in: menu, id: "claude-switcher.live-usage.beta")?.rows.allSatisfy { $0.trailing == "Sign in" } == true,
               "signed-out account hides its cached usage and asks for sign-in")
         expectRows(in: menu, id: "claude-switcher.live-usage.gamma", [9, 0], stale: false)
@@ -128,9 +129,57 @@ private final class MenuRefreshHarness {
         }
         checkCompactStructure(reopened, context: "reopened menu")
         checkDesktopStates(target: target)
+        checkModelLimits(target: target)
         checkPreview(target: target)
 
         return failures
+    }
+
+    /// A model's own weekly limit gets a gauge after the week, and the five-hour gauge
+    /// appears only for an account that reports that limit.
+    private func checkModelLimits(target: NSObject) {
+        var input = makeInitialInput()
+        let reset = now.addingTimeInterval(172_800)
+        let fable = { (percent: Double) in LiveUsageModelWindow(name: "Fable", window: LiveUsageWindow(percent: percent, resetsAt: reset)) }
+        input.liveUsage["alpha"] = LiveUsageSnapshot(
+            email: "alpha@example.test", fetchedAt: now.addingTimeInterval(-60), fiveHour: nil,
+            sevenDay: LiveUsageWindow(percent: 82, resetsAt: reset), models: [fable(100)])
+        input.liveUsage["beta"] = LiveUsageSnapshot(
+            email: "beta@example.test", fetchedAt: now.addingTimeInterval(-60),
+            fiveHour: LiveUsageWindow(percent: 12, resetsAt: midnightReset),
+            sevenDay: LiveUsageWindow(percent: 40, resetsAt: reset), models: [fable(55)])
+        let menu = MenuBuilder.build(input, target: target, actions: actions())
+
+        let weekly = usageView(in: menu, id: "claude-switcher.live-usage.alpha")
+        check(weekly?.rows.map(\.label) == ["Week", "Fable"], "an account without a five-hour limit shows the week and the model")
+        expectRows(in: menu, id: "claude-switcher.live-usage.alpha", [82, 100], stale: false)
+        check(weekly?.toolTip?.contains("Fable weekly: 100% used, resets") == true, "the tooltip names the model's limit and its reset")
+        check(weekly?.rows.map { $0.trailing != nil } == [true, false], "a model's reset is not repeated when it is the week's")
+        check(weekly?.toolTip?.contains("5-hour") == false, "a limit the account does not have is not mentioned")
+
+        let three = usageView(in: menu, id: "claude-switcher.live-usage.beta")
+        check(three?.rows.map(\.label) == ["5h", "Week", "Fable"], "an account with all three limits shows all three")
+        check(three?.frame.height == (weekly?.frame.height ?? 0) * 2, "a third limit goes on a second line")
+        check(usageView(in: menu, id: "codex.usage.delta@example.test")?.rows.map(\.label) == ["5h", "Week"],
+              "Codex keeps its five-hour and weekly gauges")
+
+        // A model whose limit resets at another time than the week shows that time.
+        input.liveUsage["alpha"] = LiveUsageSnapshot(
+            email: "alpha@example.test", fetchedAt: now.addingTimeInterval(-60), fiveHour: nil,
+            sevenDay: LiveUsageWindow(percent: 82, resetsAt: reset),
+            models: [LiveUsageModelWindow(name: "Fable", window: LiveUsageWindow(percent: 100, resetsAt: reset.addingTimeInterval(86_400)))])
+        let apart = usageView(in: MenuBuilder.build(input, target: target, actions: actions()), id: "claude-switcher.live-usage.alpha")
+        check(apart?.rows.last?.trailing != nil && apart?.rows.last?.trailing != apart?.rows.first?.trailing,
+              "a model's own reset time is shown when it differs from the week's")
+
+        // A menu on screen keeps its frame when a reading adds a limit.
+        let height = weekly?.frame.height
+        input.liveUsage["alpha"] = input.liveUsage["beta"].map {
+            LiveUsageSnapshot(email: "alpha@example.test", fetchedAt: $0.fetchedAt, fiveHour: $0.fiveHour,
+                              sevenDay: $0.sevenDay, models: $0.models)
+        }
+        MenuBuilder.updateVisible(in: menu, input: input)
+        check(weekly?.rows.count == 3 && weekly?.frame.height == height, "an open menu keeps its frame when a limit appears")
     }
 
     /// Renders the menu's own usage rows for fictional accounts in both appearances.
@@ -160,8 +209,8 @@ private final class MenuRefreshHarness {
         }
     }
 
-    /// Fictional accounts covering each gauge state: current, warning, a failed refresh, a
-    /// passed reset beside an old limit reading, and Codex.
+    /// Fictional accounts covering each gauge state: current, a spent model limit beside a
+    /// week with room, a failed refresh, a plan that still has a five-hour limit, and Codex.
     private func makePreviewInput() -> MenuBuilder.Input {
         // Monday 28 September; days past 30 run on into October.
         let at = { (day: Int, hour: Int, minute: Int) in
@@ -173,6 +222,14 @@ private final class MenuRefreshHarness {
             LiveUsageSnapshot(email: email, fetchedAt: previewNow.addingTimeInterval(-minutesOld * 60),
                               fiveHour: LiveUsageWindow(percent: five, resetsAt: fiveReset),
                               sevenDay: LiveUsageWindow(percent: week, resetsAt: weekReset))
+        }
+        /// A plan without a five-hour limit: the week, and the Fable model's own week.
+        func weekly(_ email: String, minutesOld: Double, _ week: Double, fable: Double, _ reset: Date,
+                    five: (Double, Date)? = nil) -> LiveUsageSnapshot {
+            LiveUsageSnapshot(email: email, fetchedAt: previewNow.addingTimeInterval(-minutesOld * 60),
+                              fiveHour: five.map { LiveUsageWindow(percent: $0.0, resetsAt: $0.1) },
+                              sevenDay: LiveUsageWindow(percent: week, resetsAt: reset),
+                              models: [LiveUsageModelWindow(name: "Fable", window: LiveUsageWindow(percent: fable, resetsAt: reset))])
         }
         let emails = ["work@example.com", "studio@example.com", "team@example.com", "max@example.com"]
         let profiles = emails.map { Profile(id: String($0.prefix { $0 != "@" }), label: $0, expectedEmail: $0) }
@@ -187,10 +244,10 @@ private final class MenuRefreshHarness {
                 ($0.id, AccountStatus.signedIn(email: $0.expectedEmail, plan: nil))
             }),
             liveUsage: [
-                "work": reading("work@example.com", minutesOld: 2, 12, at(28, 15, 5), 40, at(31, 7, 0)),
-                "studio": reading("studio@example.com", minutesOld: 7, 76, at(28, 17, 30), 88, at(33, 22, 0)),
-                "team": reading("team@example.com", minutesOld: 12, 84, at(28, 14, 10), 93, at(30, 4, 44)),
-                "max": reading("max@example.com", minutesOld: 25, 97, at(28, 13, 5), 100, at(29, 9, 0)),
+                "work": weekly("work@example.com", minutesOld: 2, 40, fable: 12, at(31, 7, 0)),
+                "studio": weekly("studio@example.com", minutesOld: 7, 82, fable: 100, at(33, 22, 0)),
+                "team": weekly("team@example.com", minutesOld: 12, 93, fable: 84, at(30, 4, 44)),
+                "max": weekly("max@example.com", minutesOld: 25, 35, fable: 71, at(29, 9, 0), five: (64, at(28, 17, 30))),
             ],
             usageFailures: ["team"],
             isBusy: false,

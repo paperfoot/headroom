@@ -11,6 +11,24 @@ struct CoordinatedSwitchingTests {
         #expect(ISO8601DateFormatter().string(from: reading.fetchedAt) == "2026-09-28T10:00:00Z")
         #expect(snapshot.reading(email: "another@example.com") == nil)
     }
+    @Test func aModelsOwnWeekIsReadBesideTheWeek() throws {
+        let json = #"{"accounts":[{"email":"one@example.com","active":true,"usageStatus":"ok","usage":{"sevenDay":{"pct":82,"resetsAt":"2026-11-20T07:00:00.120426+00:00"},"scoped":[{"name":"Fable","pct":100,"resetsAt":"2026-11-20T07:00:00.120580+00:00","countdown":"2d 14h"},{"name":"","pct":5},{"name":"Opus","pct":140}]},"usageFetchedAt":"2026-11-17T16:54:00Z"}],"codeEmail":"one@example.com","browser":{"ok":false}}"#
+        let snapshot = try JSONDecoder().decode(CoordinatedSnapshot.self, from: Data(json.utf8))
+        let reading = try #require(snapshot.reading(email: "one@example.com"))
+        #expect(reading.fiveHour == nil)
+        #expect(reading.sevenDay?.percent == 82)
+        // An unnamed limit and an impossible percentage are left out.
+        #expect(reading.models.map(\.name) == ["Fable"])
+        #expect(reading.models.first?.window.percent == 100)
+        #expect(reading.models.first?.window.resetsAt != nil)
+    }
+    @Test func aModelListThatCannotBeReadKeepsTheOtherReadings() throws {
+        let json = #"{"accounts":[{"email":"one@example.com","active":true,"usageStatus":"ok","usage":{"sevenDay":{"pct":82},"scoped":[{"name":7}]},"usageFetchedAt":"2026-11-17T16:54:00Z"}],"browser":{"ok":false}}"#
+        let snapshot = try JSONDecoder().decode(CoordinatedSnapshot.self, from: Data(json.utf8))
+        let reading = try #require(snapshot.reading(email: "one@example.com"))
+        #expect(reading.sevenDay?.percent == 82)
+        #expect(reading.models.isEmpty)
+    }
     @Test func undatedCacheIsNeverPresentedAsFresh() throws {
         let json = #"{"accounts":[{"email":"one@example.com","active":false,"usageStatus":"ok","usage":{"fiveHour":{"pct":17}}}],"browser":{"ok":false}}"#
         let snapshot = try JSONDecoder().decode(CoordinatedSnapshot.self, from: Data(json.utf8))

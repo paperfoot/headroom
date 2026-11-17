@@ -57,7 +57,23 @@ public enum HoldFlag {
 
 public struct CoordinatedSnapshot: Decodable, Sendable {
     public struct Window: Decodable, Sendable { public let pct: Double; public let resetsAt: String? }
-    public struct Usage: Decodable, Sendable { public let fiveHour: Window?; public let sevenDay: Window? }
+    /// One model's weekly limit, such as Fable's.
+    public struct ModelWindow: Decodable, Sendable { public let name: String; public let pct: Double; public let resetsAt: String? }
+    public struct Usage: Decodable, Sendable {
+        public let fiveHour: Window?
+        public let sevenDay: Window?
+        public let scoped: [ModelWindow]
+
+        private enum CodingKeys: String, CodingKey { case fiveHour, sevenDay, scoped }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            fiveHour = try container.decodeIfPresent(Window.self, forKey: .fiveHour)
+            sevenDay = try container.decodeIfPresent(Window.self, forKey: .sevenDay)
+            // A model list this version cannot read must not cost the account its other readings.
+            scoped = (try? container.decodeIfPresent([ModelWindow].self, forKey: .scoped)) ?? []
+        }
+    }
     public struct Account: Decodable, Sendable {
         public let email: String
         public let active: Bool
@@ -95,8 +111,13 @@ public struct CoordinatedSnapshot: Decodable, Sendable {
             guard let value, value.pct.isFinite, (0...100).contains(value.pct) else { return nil }
             return LiveUsageWindow(percent: value.pct, resetsAt: Self.date(value.resetsAt))
         }
+        let models = usage.scoped.compactMap { model -> LiveUsageModelWindow? in
+            guard !model.name.isEmpty, model.name.count <= LiveUsageSnapshot.maximumModelNameLength,
+                  let window = window(Window(pct: model.pct, resetsAt: model.resetsAt)) else { return nil }
+            return LiveUsageModelWindow(name: model.name, window: window)
+        }
         return LiveUsageSnapshot(email: email, fetchedAt: fetchedAt,
-                                 fiveHour: window(usage.fiveHour), sevenDay: window(usage.sevenDay))
+                                 fiveHour: window(usage.fiveHour), sevenDay: window(usage.sevenDay), models: models)
     }
     private static func date(_ text: String?) -> Date? {
         guard let text else { return nil }

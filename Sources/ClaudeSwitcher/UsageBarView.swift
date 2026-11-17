@@ -1,7 +1,7 @@
 import AppKit
 import ClaudeSwitcherCore
 
-/// One compact line: period, rounded gauge, percentage used, and reset time.
+/// Compact lines of two limits each: period, rounded gauge, percentage used, and reset time.
 ///
 /// A plain frame-based view drawn in one `draw(_:)`: `NSMenu` sizes a view item from its
 /// frame and stretches it to the menu's width through the autoresizing mask. Colours are
@@ -28,7 +28,8 @@ final class UsageBarView: NSView {
 
     // A column is its label, then fixed gauge, number and reset widths; whatever is left
     // separates the two columns. At the preferred width "~100%" and the widest reset,
-    // "↻ Wed 04:44", fit in both columns.
+    // "↻ Wed 04:44", fit in both columns. A third and fourth limit go on a second line.
+    private static let columns = 2
     private static let rightInset: CGFloat = 12
     private static let rowHeight: CGFloat = 22
     private static let minimumColumnGap: CGFloat = 14
@@ -49,10 +50,17 @@ final class UsageBarView: NSView {
 
     init(rows: [Row], width: CGFloat = UsageBarView.preferredWidth) {
         self.rows = rows
-        super.init(frame: NSRect(x: 0, y: 0, width: width, height: Self.rowHeight))
+        super.init(frame: NSRect(x: 0, y: 0, width: width, height: Self.height(rows: rows.count)))
         autoresizingMask = [.width]
     }
 
+    /// The height that shows `rows` limits, two to a line.
+    static func height(rows: Int) -> CGFloat {
+        CGFloat(max(1, (rows + columns - 1) / columns)) * rowHeight
+    }
+
+    /// Keeps the frame: a menu on screen does not resize its items. Limits that need a
+    /// line the view does not have appear when the menu is next opened.
     func update(rows: [Row]) {
         self.rows = rows
         needsDisplay = true
@@ -71,47 +79,62 @@ final class UsageBarView: NSView {
         let label: [NSAttributedString.Key: Any] = [.font: labelFont, .foregroundColor: Self.mutedTextColor]
         let note: [NSAttributedString.Key: Any] = [.font: noteFont, .foregroundColor: Self.mutedTextColor]
 
-        let visible = Array(rows.prefix(2))
-        let labelWidths = visible.map { ceil(($0.label as NSString).size(withAttributes: label).width) + Self.labelGap }
+        let labelWidth = { (row: Row) in ceil((row.label as NSString).size(withAttributes: label).width) + Self.labelGap }
         let fixedWidth = Self.barWidth + Self.barGap + Self.percentWidth + Self.trailingWidth
-        let used = labelWidths.reduce(0, +) + CGFloat(visible.count) * fixedWidth
-        let gap = max(Self.minimumColumnGap, bounds.width - Self.titleInset - Self.rightInset - used)
-        var start = Self.titleInset
-        for (index, row) in visible.enumerated() {
-            if index == 1 {
-                let bar = "|" as NSString
-                let x = start - (gap + bar.size(withAttributes: label).width) / 2
-                bar.draw(at: NSPoint(x: x, y: Self.baseline + labelFont.descender), withAttributes: label)
-            }
-            var x = start
-            (row.label as NSString).draw(at: NSPoint(x: x, y: Self.baseline + labelFont.descender), withAttributes: label)
-            x += labelWidths[index]
-
-            let color = Self.color(for: row.level)
-            let track = NSRect(x: x, y: (Self.rowHeight - Self.barHeight) / 2, width: Self.barWidth, height: Self.barHeight)
-            Self.drawGauge(in: track, percent: row.percent, color: color)
-            x += Self.barWidth + Self.barGap
-
-            let text = row.percent.map { (row.isStale ? "~" : "") + "\($0)%" } ?? "\u{2014}"
-            let number: [NSAttributedString.Key: Any] = [
-                .font: numberFont,
-                .foregroundColor: row.percent == nil ? Self.mutedTextColor : color,
-            ]
-            (text as NSString).draw(at: NSPoint(x: x, y: Self.baseline + numberFont.descender), withAttributes: number)
-            x += Self.percentWidth
-
-            if let trailing = row.trailing {
-                // The last column may use the slack; a narrower view clips instead of overlapping.
-                let end = index == visible.count - 1 ? bounds.width - Self.rightInset : x + Self.trailingWidth
-                let available = end - x
-                if available > 20 {
-                    NSGraphicsContext.saveGraphicsState()
-                    NSBezierPath(rect: NSRect(x: x, y: 0, width: available, height: bounds.height)).addClip()
-                    (trailing as NSString).draw(at: NSPoint(x: x, y: Self.baseline + noteFont.descender), withAttributes: note)
-                    NSGraphicsContext.restoreGraphicsState()
+        let available = bounds.width - Self.titleInset - Self.rightInset
+        // Gauges line up from line to line when the widest label of each column leaves room;
+        // otherwise each line is laid out by itself, so a long label below cannot clip the line above.
+        var aligned = [CGFloat](repeating: 0, count: min(Self.columns, rows.count))
+        for (index, row) in rows.enumerated() {
+            aligned[index % Self.columns] = max(aligned[index % Self.columns], labelWidth(row))
+        }
+        let alignedFits = aligned.reduce(0, +) + CGFloat(aligned.count) * fixedWidth
+            + CGFloat(max(0, aligned.count - 1)) * Self.minimumColumnGap <= available
+        for first in stride(from: 0, to: rows.count, by: Self.columns) {
+            // The first line is at the top; a line below the frame is not drawn.
+            let bottom = bounds.height - CGFloat(first / Self.columns + 1) * Self.rowHeight
+            guard bottom >= 0 else { break }
+            let line = rows[first..<min(first + Self.columns, rows.count)]
+            let labelWidths = alignedFits ? aligned : line.map(labelWidth)
+            let used = labelWidths.reduce(0, +) + CGFloat(labelWidths.count) * fixedWidth
+            let gap = max(Self.minimumColumnGap, available - used)
+            var start = Self.titleInset
+            for (column, row) in line.enumerated() {
+                if column > 0 {
+                    let bar = "|" as NSString
+                    let x = start - (gap + bar.size(withAttributes: label).width) / 2
+                    bar.draw(at: NSPoint(x: x, y: bottom + Self.baseline + labelFont.descender), withAttributes: label)
                 }
+                var x = start
+                (row.label as NSString).draw(at: NSPoint(x: x, y: bottom + Self.baseline + labelFont.descender), withAttributes: label)
+                x += labelWidths[column]
+
+                let color = Self.color(for: row.level)
+                let track = NSRect(x: x, y: bottom + (Self.rowHeight - Self.barHeight) / 2, width: Self.barWidth, height: Self.barHeight)
+                Self.drawGauge(in: track, percent: row.percent, color: color)
+                x += Self.barWidth + Self.barGap
+
+                let text = row.percent.map { (row.isStale ? "~" : "") + "\($0)%" } ?? "\u{2014}"
+                let number: [NSAttributedString.Key: Any] = [
+                    .font: numberFont,
+                    .foregroundColor: row.percent == nil ? Self.mutedTextColor : color,
+                ]
+                (text as NSString).draw(at: NSPoint(x: x, y: bottom + Self.baseline + numberFont.descender), withAttributes: number)
+                x += Self.percentWidth
+
+                if let trailing = row.trailing {
+                    // The last column may use the slack; a narrower view clips instead of overlapping.
+                    let end = column == labelWidths.count - 1 ? bounds.width - Self.rightInset : x + Self.trailingWidth
+                    let available = end - x
+                    if available > 20 {
+                        NSGraphicsContext.saveGraphicsState()
+                        NSBezierPath(rect: NSRect(x: x, y: bottom, width: available, height: Self.rowHeight)).addClip()
+                        (trailing as NSString).draw(at: NSPoint(x: x, y: bottom + Self.baseline + noteFont.descender), withAttributes: note)
+                        NSGraphicsContext.restoreGraphicsState()
+                    }
+                }
+                start += labelWidths[column] + fixedWidth + gap
             }
-            start += labelWidths[index] + fixedWidth + gap
         }
     }
 
@@ -148,7 +171,9 @@ final class UsageBarView: NSView {
                               appearance name: NSAppearance.Name, to url: URL) throws {
         let padding: CGFloat = 6
         let scale: CGFloat = 2
-        let size = NSSize(width: preferredWidth, height: padding * 2 + CGFloat(accounts.count) * rowHeight * 2)
+        let gaugeHeights = accounts.map { height(rows: $0.rows.count) }
+        let size = NSSize(width: preferredWidth,
+                          height: padding * 2 + CGFloat(accounts.count) * rowHeight + gaugeHeights.reduce(0, +))
         guard let appearance = NSAppearance(named: name),
               let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width * scale),
                                             pixelsHigh: Int(size.height * scale), bitsPerSample: 8,
@@ -169,12 +194,12 @@ final class UsageBarView: NSView {
 
             let title: [NSAttributedString.Key: Any] = [.font: NSFont.menuFont(ofSize: 0), .foregroundColor: NSColor.labelColor]
             var y = size.height - padding
-            for account in accounts {
+            for (account, gaugeHeight) in zip(accounts, gaugeHeights) {
                 y -= rowHeight
                 let text = account.title as NSString
                 text.draw(at: NSPoint(x: titleInset, y: y + (rowHeight - text.size(withAttributes: title).height) / 2),
                           withAttributes: title)
-                y -= rowHeight
+                y -= gaugeHeight
                 let gauges = UsageBarView(rows: account.rows)
                 NSGraphicsContext.saveGraphicsState()
                 let offset = NSAffineTransform()

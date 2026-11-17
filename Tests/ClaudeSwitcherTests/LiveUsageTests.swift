@@ -162,6 +162,82 @@ struct LiveUsageTests {
         #expect(snapshot.sevenDay?.percent == 67)
     }
 
+    /// What Claude Code 2.1.326 returns for a plan without a five-hour limit, cut to the keys read.
+    static let weeklyAndModelPayload = #"""
+    {"five_hour":null,
+     "seven_day":{"utilization":82,"resets_at":"2026-11-20T07:00:00.120426+00:00","limit_dollars":null},
+     "seven_day_opus":null,"seven_day_sonnet":null,
+     "extra_usage":{"is_enabled":false,"monthly_limit":null,"used_credits":0,"utilization":null},
+     "limits":[
+      {"kind":"weekly_all","group":"weekly","percent":82,"severity":"normal","resets_at":"2026-11-20T07:00:00.120426+00:00","scope":null,"is_active":true},
+      {"kind":"weekly_scoped","group":"weekly","percent":100,"severity":"normal","resets_at":"2026-11-20T07:00:00.120580+00:00",
+       "scope":{"model":{"id":null,"display_name":"Fable"},"surface":null},"is_active":false}],
+     "weekly_scoped_shares":[{"limit_index":1,"used_percent_of_weekly":41,"allowance_percent_of_weekly":50}],
+     "model_scoped":[{"display_name":"Fable","utilization":100,"resets_at":"2026-11-20T07:00:00.120580+00:00"}]}
+    """#
+
+    @Test("A model's own weekly limit is read beside the week, and a missing five-hour limit stays absent")
+    func modelLimitIsReadWithoutAFiveHourWindow() throws {
+        let snapshot = try LiveUsageSnapshot.decode(data(Self.weeklyAndModelPayload), email: "person@example.com", now: now)
+
+        #expect(snapshot.fiveHour == nil)
+        #expect(snapshot.sevenDay?.percent == 82)
+        #expect(snapshot.models.map(\.name) == ["Fable"])
+        #expect(snapshot.models.first?.window.percent == 100)
+        let reset = try #require(snapshot.models.first?.window.resetsAt)
+        #expect(snapshot.windows.count == 2)
+        // The reading is refreshed when the model's limit resets, not only the week's.
+        let justBefore = reset.addingTimeInterval(-30)
+        let reread = LiveUsageSnapshot(email: "a", fetchedAt: justBefore, fiveHour: nil, sevenDay: nil, models: snapshot.models)
+        #expect(LiveUsagePolicy.nextRefresh(for: reread, now: justBefore) == reset)
+    }
+
+    @Test("Model limits are found in either list Claude sends, once each")
+    func modelLimitsComeFromEitherList() throws {
+        let older = try LiveUsageSnapshot.decode(data(#"{"seven_day":{"utilization":10},"model_scoped":[{"display_name":"Fable","utilization":40,"resets_at":null},{"display_name":"fable","utilization":50}]}"#), email: "a", now: now)
+        #expect(older.models == [LiveUsageModelWindow(name: "Fable", window: LiveUsageWindow(percent: 40, resetsAt: nil))])
+
+        let both = try LiveUsageSnapshot.decode(data(#"{"seven_day":{"utilization":10},"limits":[{"kind":"weekly_scoped","percent":70,"scope":{"model":{"display_name":"Fable"}}}],"model_scoped":[{"display_name":"Fable","utilization":40},{"display_name":"Opus","utilization":5}]}"#), email: "a", now: now)
+        #expect(both.models.map(\.name) == ["Fable"])
+        #expect(both.models.first?.window.percent == 70)
+    }
+
+    @Test("Limits that name no model, or carry no usable figure, are not model limits")
+    func unusableModelLimitsAreLeftOut() throws {
+        let long = String(repeating: "x", count: 25)
+        let snapshot = try LiveUsageSnapshot.decode(data(#"{"seven_day":{"utilization":10},"limits":[{"kind":"weekly_all","percent":10,"scope":null},{"kind":"weekly_scoped","percent":30,"scope":{"model":null,"surface":"cowork"}},{"percent":"30","scope":{"model":{"display_name":"Text"}}},{"percent":130,"scope":{"model":{"display_name":"Over"}}},{"percent":true,"scope":{"model":{"display_name":"Flag"}}},{"percent":30,"scope":{"model":{"display_name":"  "}}},{"percent":30,"scope":{"model":{"display_name":"\#(long)"}}},{"percent":30,"resets_at":"soon","scope":{"model":{"display_name":"BadDate"}}},"noise",{"percent":30,"scope":{"model":{"display_name":" Opus "}}}]}"#), email: "a", now: now)
+
+        #expect(snapshot.models == [LiveUsageModelWindow(name: "Opus", window: LiveUsageWindow(percent: 30, resetsAt: nil))])
+    }
+
+    @Test("The week is still read if only the limits list carries it")
+    func weekFallsBackToTheLimitsList() throws {
+        let snapshot = try LiveUsageSnapshot.decode(data(#"{"five_hour":null,"seven_day":null,"limits":[{"kind":"weekly_all","percent":64,"resets_at":"2026-11-20T07:00:00Z","scope":null}]}"#), email: "a", now: now)
+        #expect(snapshot.sevenDay?.percent == 64)
+        #expect(snapshot.sevenDay?.resetsAt != nil)
+
+        let withoutLegacyKeys = try LiveUsageSnapshot.decode(data(#"{"limits":[{"kind":"weekly_all","percent":7,"scope":null}]}"#), email: "a", now: now)
+        #expect(withoutLegacyKeys.sevenDay?.percent == 7)
+        // The legacy figure wins while it is sent.
+        let legacy = try LiveUsageSnapshot.decode(data(#"{"seven_day":{"utilization":20},"limits":[{"kind":"weekly_all","percent":64,"scope":null}]}"#), email: "a", now: now)
+        #expect(legacy.sevenDay?.percent == 20)
+    }
+
+    @Test("A reading saved before model limits existed still loads")
+    func aSavedReadingWithoutModelsDecodes() throws {
+        let saved = LiveUsageSnapshot(email: "person@example.com", fetchedAt: now, fiveHour: nil,
+                                      sevenDay: LiveUsageWindow(percent: 64, resetsAt: now.addingTimeInterval(86400)),
+                                      models: [LiveUsageModelWindow(name: "Fable", window: LiveUsageWindow(percent: 30, resetsAt: nil))])
+        let encoded = try JSONEncoder().encode(saved)
+        #expect(try JSONDecoder().decode(LiveUsageSnapshot.self, from: encoded) == saved)
+
+        var object = try #require(try JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object.removeValue(forKey: "models")
+        let older = try JSONDecoder().decode(LiveUsageSnapshot.self, from: JSONSerialization.data(withJSONObject: object))
+        #expect(older.sevenDay == saved.sevenDay)
+        #expect(older.models.isEmpty)
+    }
+
     @Test("A matching failure control response is unavailable")
     func decodeResponseRejectsFailureSubtype() {
         let output = data(#"{"type":"control_response","response":{"request_id":"claude-switcher-usage","subtype":"error","error":"usage failed"}}"#)

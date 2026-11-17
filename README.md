@@ -8,7 +8,7 @@
 
 When one Claude account runs low, Claude Code and Claude in Chrome move to an account with room, and stay put while your agents drive Chrome. One palette for every Claude and Codex account.
 
-Switch Claude.ai in Chrome, Claude Code, Claude in Chrome and the Codex app together, and see five-hour and weekly usage at a glance. The app installs as **Claude Switcher**.
+Switch Claude.ai in Chrome, Claude Code, Claude in Chrome and the Codex app together, and see each account's weekly and Fable usage at a glance. The app installs as **Claude Switcher**.
 
 <br />
 
@@ -32,12 +32,12 @@ Switch Claude.ai in Chrome, Claude Code, Claude in Chrome and the Codex app toge
 A small native menu bar app for Macs with more than one Claude or Codex subscription. Pick a Claude account and Claude.ai in Chrome, Claude Code and the Claude in Chrome extension your agents use all move to it. Pick a Codex account and the Codex app reopens with it.
 
 <p align="center">
-  <img src="assets/palette-light.png" width="640" alt="The command palette before typing: accounts ranked by headroom with their five-hour and weekly usage, then Add account and Auto-switch">
+  <img src="assets/palette-light.png" width="640" alt="The command palette before typing: accounts ranked by headroom with their weekly and Fable usage, then Add account and Auto-switch">
 </p>
 
 <p align="center">
-  <img src="assets/usage-light.png" width="407" alt="Claude and Codex accounts with five-hour and weekly usage gauges in light appearance">
-  <img src="assets/usage-dark.png" width="407" alt="Claude and Codex accounts with five-hour and weekly usage gauges in dark appearance">
+  <img src="assets/usage-light.png" width="407" alt="Claude accounts with weekly and Fable usage gauges, one with a five-hour gauge too, and a Codex account, in light appearance">
+  <img src="assets/usage-dark.png" width="407" alt="Claude accounts with weekly and Fable usage gauges, one with a five-hour gauge too, and a Codex account, in dark appearance">
 </p>
 
 <sub>Example accounts. Which usage windows appear depends on the provider.</sub>
@@ -87,7 +87,9 @@ The menu bar menu shows every account with its usage. Click an email to switch. 
 
 ## Switch automatically near a limit
 
-Type `auto` in the palette and turn on **Auto-switch at limit**. Claude Code and every connected Chrome profile stay on the account you are using until it is spent (98% of its five-hour or weekly limit by default), then move to the account whose weekly limit resets soonest and still has room, so long sessions keep going.
+Type `auto` in the palette and turn on **Auto-switch at limit**. Claude Code and every connected Chrome profile stay on the account you are using until it is spent (98% of a limit by default), then move to the account whose weekly limit resets soonest and still has room, so long sessions keep going.
+
+An account is spent when any one of its limits is: the week for all models, a model's own week, or the five-hour limit on plans that have one. Max and Ultra plans give Fable its own weekly limit, half the weekly allowance, and it can fill while the week still has room. Fable work stops there, so the switcher leaves that account too.
 
 Before that, the switcher moves early only to save quota that would otherwise expire: an account whose weekly limit resets within six hours, or within an hour per percent it has left. It never makes such an early move:
 
@@ -123,7 +125,7 @@ Remove the key with `--remove-typesafe-key`. The key lives in your login Keychai
 
 ## Reading the gauges
 
-Each account shows how much of its five-hour and weekly limits it has used.
+Each Claude account shows how much of its week it has used and, beside it, how much of each model's own weekly limit, such as Fable's. An account on a plan with a five-hour limit shows that too; verified Ultra accounts have none. A model's limit resets with the week, so its reset time is shown only if it differs. Codex accounts show their five-hour and weekly limits.
 
 | You see | Meaning |
 | --- | --- |

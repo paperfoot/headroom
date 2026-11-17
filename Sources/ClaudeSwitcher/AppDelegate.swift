@@ -1704,7 +1704,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                   isSelected: coordinated && email.caseInsensitiveCompare(selected ?? "") == .orderedSame,
                                   needsSignIn: signedOut,
                                   fiveHourUsed: reading?.fiveHour?.displayedPercent(at: now),
-                                  weekUsed: reading?.sevenDay?.displayedPercent(at: now))
+                                  weekUsed: reading?.sevenDay?.displayedPercent(at: now),
+                                  models: (reading?.models ?? []).compactMap { model in
+                                      model.window.displayedPercent(at: now).map { .init(name: model.name, used: $0) }
+                                  })
         }
         accounts += codexAccounts.map { account in
             PaletteAccount(product: .codex, id: account.email, email: account.email, isSelected: account.active,

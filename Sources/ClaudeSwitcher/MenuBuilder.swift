@@ -241,15 +241,15 @@ enum MenuBuilder {
         let presentation = LiveUsagePresentation(profile: profile, status: status, snapshot: snapshot, failed: failed, now: now)
         let matches = status?.matches(profile.expectedEmail) == true
         let waiting = status == .signedOut ? "Sign in" : (failed ? "Retrying" : (matches || status == nil ? "Loading" : "Checking"))
-        let item = gaugeItem(presentation.snapshot, stale: presentation.isStale, failed: failed, waiting: waiting,
-                             subject: profile.expectedEmail ?? status?.email ?? profile.label, now: now)
+        let item = gaugeItem(presentation.snapshot, fiveHourAlways: false, stale: presentation.isStale, failed: failed,
+                             waiting: waiting, subject: profile.expectedEmail ?? status?.email ?? profile.label, now: now)
         item.identifier = NSUserInterfaceItemIdentifier("claude-switcher.live-usage.\(profile.id)")
         return item
     }
 
     private static func codexUsageItem(_ account: CodexAccount, now: Date) -> NSMenuItem {
         let stale = LiveUsagePolicy.isStale(account.usage, failed: account.usageFailed, now: now)
-        let item = gaugeItem(account.usage, stale: stale, failed: account.usageFailed,
+        let item = gaugeItem(account.usage, fiveHourAlways: true, stale: stale, failed: account.usageFailed,
                              waiting: account.usageFailed ? "Retrying" : "Loading", subject: account.email, now: now)
         item.identifier = NSUserInterfaceItemIdentifier("codex.usage.\(account.email)")
         return item
@@ -257,16 +257,26 @@ enum MenuBuilder {
 
     /// Claude and Codex rows share one rule: colour follows the level, a stale reading is shown
     /// as approximate, and a window whose reset has passed is unknown until the next reading.
-    /// `waiting` stands in for both windows while there is no reading at all.
-    private static func gaugeItem(_ snapshot: LiveUsageSnapshot?, stale: Bool, failed: Bool, waiting: String,
-                                  subject: String, now: Date) -> NSMenuItem {
+    /// `waiting` stands in for the windows while there is no reading at all.
+    ///
+    /// The week is always shown, then each model's own week, such as Fable's. Codex always has
+    /// a five-hour limit (`fiveHourAlways`); Claude shows one only when the account reports it.
+    /// A model's limit resets with the week, so its row repeats the reset only when it differs;
+    /// the tooltip spells out every reset.
+    private static func gaugeItem(_ snapshot: LiveUsageSnapshot?, fiveHourAlways: Bool, stale: Bool, failed: Bool,
+                                  waiting: String, subject: String, now: Date) -> NSMenuItem {
         var rows: [UsageBarView.Row] = []
         var lines: [String] = []
-        for (label, name, window) in [("5h", "5-hour", snapshot?.fiveHour), ("Week", "Weekly", snapshot?.sevenDay)] {
+        var windows: [(label: String, name: String, window: LiveUsageWindow?, isModel: Bool)] = []
+        if fiveHourAlways || snapshot?.fiveHour != nil { windows.append(("5h", "5-hour", snapshot?.fiveHour, false)) }
+        windows.append(("Week", "Weekly", snapshot?.sevenDay, false))
+        windows += (snapshot?.models ?? []).map { ($0.name, "\($0.name) weekly", $0.window, true) }
+        var weekTrailing: String?
+        for (label, name, window, isModel) in windows {
             let reset = window?.resetsAt
             let expired = reset.map { $0 <= now } ?? false
             let percent = window.flatMap { $0.percent.isFinite ? $0.displayedPercent(at: now) : nil }
-            let trailing: String?
+            var trailing: String?
             if snapshot == nil {
                 trailing = waiting
             } else if expired {
@@ -274,6 +284,7 @@ enum MenuBuilder {
             } else {
                 trailing = reset.map { "↻ \(compactClock($0, now: now))" }
             }
+            if isModel { if trailing == weekTrailing { trailing = nil } } else if label == "Week" { weekTrailing = trailing }
             rows.append(UsageBarView.Row(label: label, percent: percent, level: UsageLevel.of(percent ?? 0),
                                          trailing: trailing, isStale: stale && percent != nil))
             if expired {

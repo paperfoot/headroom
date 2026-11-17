@@ -150,14 +150,15 @@ public struct Config: Codable, Equatable, Sendable {
     /// Keep Claude Desktop from updating itself, through its own `disableAutoUpdates` policy.
     public var blockClaudeUpdates: Bool
 
-    /// Move Chrome and Claude Code to the account with the most headroom when the selected
-    /// one nears its five-hour or weekly limit. The account engine makes the decision.
+    /// Move Chrome and Claude Code to another account when the selected one nears a limit:
+    /// its week, a model's own week such as Fable's, or its five-hour limit where it has one.
+    /// The account engine makes the decision.
     public var autoSwitch: Bool
 
-    /// Binding-window utilization (the higher of 5h and weekly) at which an account counts
-    /// as spent: auto-switch leaves it and never picks it. Auto-switch spends the account
-    /// that resets soonest first, so a high value keeps its last few percent from expiring
-    /// unused. The engine accepts 50–99.9.
+    /// Utilization of an account's fullest limit at which it counts as spent: auto-switch
+    /// leaves it and never picks it. Auto-switch spends the account that resets soonest
+    /// first, so a high value keeps its last few percent from expiring unused. The engine
+    /// accepts 50–99.9.
     public var autoSwitchThreshold: Double
 
     /// Global shortcut that opens the command palette, e.g. "option+space".

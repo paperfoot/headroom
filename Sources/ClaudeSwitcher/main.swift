@@ -215,9 +215,12 @@ if let index = commandLineArguments.firstIndex(of: "--palette-preview"),
     let directory = URL(fileURLWithPath: commandLineArguments[commandLineArguments.index(after: index)], isDirectory: true)
     let example = PaletteContext(
         accounts: [
-            PaletteAccount(product: .claude, id: "work", email: "work@example.com", isSelected: true, fiveHourUsed: 96, weekUsed: 71),
-            PaletteAccount(product: .claude, id: "personal", email: "personal@example.com", fiveHourUsed: 12, weekUsed: 34),
-            PaletteAccount(product: .claude, id: "team", email: "team199@example.org", fiveHourUsed: 0, weekUsed: 88),
+            PaletteAccount(product: .claude, id: "work", email: "work@example.com", isSelected: true, weekUsed: 71,
+                           models: [.init(name: "Fable", used: 96)]),
+            PaletteAccount(product: .claude, id: "personal", email: "personal@example.com", weekUsed: 34,
+                           models: [.init(name: "Fable", used: 12)]),
+            PaletteAccount(product: .claude, id: "team", email: "team199@example.org", weekUsed: 88,
+                           models: [.init(name: "Fable", used: 40)]),
             PaletteAccount(product: .claude, id: "lab", email: "lab-alpha@example.net", needsSignIn: true),
             PaletteAccount(product: .codex, id: "personal@example.com", email: "personal@example.com", isSelected: true, weekUsed: 5),
             PaletteAccount(product: .codex, id: "work@example.com", email: "work@example.com", weekUsed: 98),

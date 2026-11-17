@@ -144,6 +144,14 @@ struct JevRouterRequestTests {
         #expect(bucket(10, 85) == "little")
         #expect(bucket(98, 10) == "none")
         #expect(bucket(nil, nil) == "unknown")
+        // A model's own week counts: the account cannot do that model's work.
+        func model(_ week: Int?, _ fable: Int) -> String {
+            JevRouter.headroom(PaletteAccount(product: .claude, id: "x", email: "x@example.com", weekUsed: week,
+                                              models: [.init(name: "Fable", used: fable)]))
+        }
+        #expect(model(40, 100) == "none")
+        #expect(model(10, 85) == "little")
+        #expect(model(nil, 20) == "plenty")
     }
 }
 

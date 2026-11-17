@@ -17,27 +17,65 @@ public struct LiveUsageWindow: Codable, Equatable, Sendable {
     }
 }
 
+/// A weekly limit that applies to one model, such as Fable.
+public struct LiveUsageModelWindow: Codable, Equatable, Sendable {
+    public let name: String
+    public let window: LiveUsageWindow
+
+    public init(name: String, window: LiveUsageWindow) {
+        self.name = name
+        self.window = window
+    }
+}
+
 public struct LiveUsageSnapshot: Codable, Equatable, Sendable {
     public let email: String
     public let fetchedAt: Date
+    /// `nil` when the account has no five-hour limit, as on a verified Ultra plan.
     public let fiveHour: LiveUsageWindow?
     public let sevenDay: LiveUsageWindow?
+    /// Weekly limits for single models, in the order the account reports them. Such a limit
+    /// can fill while the week for all models still has room.
+    public let models: [LiveUsageModelWindow]
 
-    public init(email: String, fetchedAt: Date, fiveHour: LiveUsageWindow?, sevenDay: LiveUsageWindow?) {
+    public init(email: String, fetchedAt: Date, fiveHour: LiveUsageWindow?, sevenDay: LiveUsageWindow?,
+                models: [LiveUsageModelWindow] = []) {
         self.email = email
         self.fetchedAt = fetchedAt
         self.fiveHour = fiveHour
         self.sevenDay = sevenDay
+        self.models = models
     }
 
+    /// Readings saved before model limits existed have no `models`.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        email = try container.decode(String.self, forKey: .email)
+        fetchedAt = try container.decode(Date.self, forKey: .fetchedAt)
+        fiveHour = try container.decodeIfPresent(LiveUsageWindow.self, forKey: .fiveHour)
+        sevenDay = try container.decodeIfPresent(LiveUsageWindow.self, forKey: .sevenDay)
+        models = (try? container.decodeIfPresent([LiveUsageModelWindow].self, forKey: .models)) ?? []
+    }
+
+    /// Every limit that can stop work on this account, each with the moment it resets.
+    public var windows: [LiveUsageWindow] {
+        [fiveHour, sevenDay].compactMap { $0 } + models.map(\.window)
+    }
+
+    /// Longest model name kept: it is a gauge label, not free text.
+    static let maximumModelNameLength = 24
+
+    /// Reads Claude's usage payload. The five-hour and all-models windows come from
+    /// `five_hour` and `seven_day`; each model's weekly limit is an entry of `limits` that
+    /// names a model, with `model_scoped` as the same list in an older form.
     public static func decode(_ data: Data, email: String, now: Date) throws -> Self {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              root.keys.contains("five_hour") || root.keys.contains("seven_day") else {
+              root.keys.contains("five_hour") || root.keys.contains("seven_day") || root["limits"] is [Any] else {
             throw LiveUsageError.unavailable
         }
-        func window(_ key: String) -> LiveUsageWindow? {
-            guard let value = root[key] as? [String: Any],
-                  let percent = value["utilization"] as? NSNumber,
+        func window(_ value: Any?, percent key: String) -> LiveUsageWindow? {
+            guard let value = value as? [String: Any],
+                  let percent = value[key] as? NSNumber,
                   CFGetTypeID(percent) != CFBooleanGetTypeID(), percent.doubleValue.isFinite,
                   (0...100).contains(percent.doubleValue) else { return nil }
             var reset: Date?
@@ -49,7 +87,28 @@ public struct LiveUsageSnapshot: Codable, Equatable, Sendable {
             } else if value["resets_at"] != nil, !(value["resets_at"] is NSNull) { return nil }
             return LiveUsageWindow(percent: percent.doubleValue, resetsAt: reset)
         }
-        return Self(email: email, fetchedAt: now, fiveHour: window("five_hour"), sevenDay: window("seven_day"))
+        let limits = (root["limits"] as? [Any] ?? []).compactMap { $0 as? [String: Any] }
+        var models: [LiveUsageModelWindow] = []
+        func add(_ name: Any?, _ window: LiveUsageWindow?) {
+            guard let name = (name as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty,
+                  name.count <= maximumModelNameLength, let window,
+                  !models.contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) else { return }
+            models.append(LiveUsageModelWindow(name: name, window: window))
+        }
+        for limit in limits {
+            let model = (limit["scope"] as? [String: Any])?["model"] as? [String: Any]
+            add(model?["display_name"], window(limit, percent: "percent"))
+        }
+        if models.isEmpty {
+            for entry in (root["model_scoped"] as? [Any] ?? []).compactMap({ $0 as? [String: Any] }) {
+                add(entry["display_name"], window(entry, percent: "utilization"))
+            }
+        }
+        // The week for all models, should `seven_day` stop being sent the way `five_hour` did.
+        let week = window(root["seven_day"], percent: "utilization")
+            ?? limits.first { $0["kind"] as? String == "weekly_all" }.flatMap { window($0, percent: "percent") }
+        return Self(email: email, fetchedAt: now, fiveHour: window(root["five_hour"], percent: "utilization"),
+                    sevenDay: week, models: models)
     }
 }
 
@@ -73,8 +132,7 @@ public enum LiveUsagePolicy {
     }
 
     public static func nextRefresh(for snapshot: LiveUsageSnapshot, now: Date) -> Date {
-        let reset = [snapshot.fiveHour?.resetsAt, snapshot.sevenDay?.resetsAt]
-            .compactMap { $0 }.filter { $0 > now }.min() ?? .distantFuture
+        let reset = snapshot.windows.compactMap(\.resetsAt).filter { $0 > now }.min() ?? .distantFuture
         return min(snapshot.fetchedAt.addingTimeInterval(refreshInterval), reset)
     }
 }
