@@ -360,7 +360,10 @@ AGENT_TOOL_WINDOW = 10 * 60
 # Subagents write their own files; look inside sessions active this recently.
 AGENT_SESSION_WINDOW = 2 * 60 * 60
 AGENT_TOOLS = ('"name":"mcp__claude-in-chrome__', '"name":"mcp__computer-use__')
-TRANSCRIPT_TAIL = 512 * 1024
+# A screenshot result is one transcript line of up to 1.6 MB, written straight after the
+# call that made it. With 512 KB the call had left the tail by the next tick: over a week
+# of this Mac's transcripts the hold was missed in a quarter of the minutes it covers.
+TRANSCRIPT_TAIL = 8 * 1024 * 1024
 
 
 def transcript_roots():

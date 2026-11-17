@@ -1685,6 +1685,12 @@ class AutoTickTests(unittest.TestCase):
             self.assertFalse(companion.agents_driving_browser(now))
             session.write_text(line("mcp__computer-use__left_click", 120))
             self.assertTrue(companion.agents_driving_browser(now))
+            # A screenshot's result is one line of a megabyte or more, written after the call.
+            result = json.dumps({"type": "user", "message": {"content": [
+                {"type": "tool_result", "content": [{"type": "image", "data": "A" * (1_600 * 1024)}]}]}}) + "\n"
+            session.write_text(line("mcp__computer-use__screenshot", 90) + result)
+            subagent.write_text(line("Bash", 30))
+            self.assertTrue(companion.agents_driving_browser(now))
 
     def test_an_out_of_range_threshold_is_refused(self):
         for threshold in (101, 10, float("nan")):
