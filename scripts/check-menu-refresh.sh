@@ -21,6 +21,7 @@ swiftc \
 ui_sources=(
   "$repo_dir/Sources/ClaudeSwitcher/UsageBarView.swift"
   "$repo_dir/Sources/ClaudeSwitcher/MenuBuilder.swift"
+  "$repo_dir/Sources/ClaudeSwitcher/StatusItemFeedback.swift"
 )
 if [[ -f "$repo_dir/Sources/ClaudeSwitcher/MenuDetailView.swift" ]]; then
   ui_sources+=("$repo_dir/Sources/ClaudeSwitcher/MenuDetailView.swift")
