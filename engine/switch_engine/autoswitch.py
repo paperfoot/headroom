@@ -2001,7 +2001,19 @@ class AutoSwitchEngine:
             elif consume_first:
                 # Soonest weekly reset first (unknown resets sort last), most
                 # headroom breaks ties, then sequence order.
-                key = (reset_ts if reset_ts is not None else float("inf"), -h)
+                #
+                # An account over the line sorts after every account under it.
+                # Only an escape (at-limit, failover) can see one here: the
+                # landing rule above already dropped them for the other
+                # triggers. Without this an escape took the soonest reset with
+                # any crumb left, and consume-first drains accounts in reset
+                # order, so that was the account it had just left at 99.x% --
+                # a second forced switch a minute or two later.
+                key = (
+                    (100.0 - h) >= settings.threshold,
+                    reset_ts if reset_ts is not None else float("inf"),
+                    -h,
+                )
             else:
                 key = (-h,)
             qualifying.append((key, num))
